@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-IY HOMELAB metrics bridge.
+KUBELAB metrics bridge.
 
 Reads homelab telemetry and publishes it into Home Assistant as sensor
 entities, which the ESP32-C6 display then subscribes to over the native
@@ -373,7 +373,7 @@ def main():
         log("FATAL: HA_TOKEN not set. Source integrations/bridge.env first.")
         sys.exit(1)
 
-    log(f"IY HOMELAB bridge starting | HA={HA_URL} | nodes={PVE_NODES} | k8s={ENABLE_K8S} "
+    log(f"KUBELAB bridge starting | HA={HA_URL} | nodes={PVE_NODES} | k8s={ENABLE_K8S} "
         f"| temp={ENABLE_TEMP} | interval={POLL_INTERVAL}s | oneshot={ONESHOT}")
     while True:
         proxmox = collect_proxmox()

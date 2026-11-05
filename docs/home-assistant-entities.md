@@ -1,6 +1,6 @@
 # Home Assistant Entity Discovery Report
 
-Generated during IY HOMELAB display build. Entity IDs below are **actual**
+Generated during KUBELAB display build. Entity IDs below are **actual**
 identifiers returned by the Home Assistant REST API (`GET /api/states`) on
 `https://ha.example.com`. No entity IDs are invented.
 

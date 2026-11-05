@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Wrapper that loads secrets then runs the IY HOMELAB metrics bridge.
+# Wrapper that loads secrets then runs the KUBELAB metrics bridge.
 # Used by launchd (com.iyhomelab.bridge.plist) or by hand.
 set -e
 HERE="${0:A:h}"

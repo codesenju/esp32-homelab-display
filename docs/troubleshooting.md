@@ -61,7 +61,21 @@ specific to this 172-wide panel; do not remove it.
 **Button doesn't switch pages**
 - `binary_sensor.iy_homelab_display_page_button` should toggle in HA when you
   press BOOT. If it never changes, the press isn't reaching GPIO9 — confirm you
-  press **BOOT**, not RESET.
+  press **BOOT** (left, `< PAGE`), not RESET (right). Each press advances
+  CPU → MEMORY → TEMP → CPU.
+
+## Temperature page shows `--`
+
+- A node needs `lm-sensors` installed and exposing `coretemp`:
+  ```
+  ssh root@<node> "apt-get install -y lm-sensors && sensors -j | grep -i package"
+  ```
+- Temperature is read over SSH by the bridge, so it needs `ENABLE_TEMP=1`, a
+  valid `TEMP_SSH_KEY`, and a correct `TEMP_NODE_HOSTS` mapping in `bridge.env`.
+- Verify the entity:
+  ```
+  curl -s $HA_URL/api/states/sensor.kubelab_1_temperature -H "Authorization: Bearer $HA_TOKEN"
+  ```
 
 ## Metrics show `--` or grey dots
 

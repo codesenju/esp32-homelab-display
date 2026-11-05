@@ -1,6 +1,7 @@
-# IY HOMELAB — ESP32-C6 Monitoring Display
+# KUBELAB — ESP32-C6 Monitoring Display
 
-An always-on monitoring dashboard for the **IY HOMELAB** running on a
+An always-on monitoring dashboard for the **KUBELAB** homelab cluster, running
+on a
 **Waveshare ESP32-C6-LCD-1.47-M** (1.47" ST7789, 172×320, 8 MB flash).
 
 The display shows live Proxmox cluster CPU usage, memory usage, node
@@ -46,6 +47,21 @@ encrypted ESPHome ↔ Home Assistant API and subscribes to sensor entities that
 the bridge (`integrations/proxmox_bridge.py`) publishes into Home Assistant.
 
 See `docs/architecture.md` for details.
+
+## Pages & buttons
+
+Three pages, cycled with the on-board **BOOT button (left, `< PAGE`)**:
+
+| Page | Shows | Colour thresholds |
+|------|-------|-------------------|
+| 1 — CPU | per-node CPU usage % | <60 green, 60–85 amber, ≥85 red |
+| 2 — MEMORY | per-node RAM usage % | <60 green, 60–85 amber, ≥85 red |
+| 3 — TEMP | per-node CPU package temp °C | <70 green, 70–85 amber, ≥85 red |
+
+All pages also show Kubernetes cluster health, the clock, and Wi-Fi / HA
+connectivity. The **right button is RESET** (`RESET >`, hardware reboot only).
+A node's status dot reflects health (green/amber/red) and goes grey when data
+is unknown or stale. Missing numeric values render as `--`.
 
 ## Hardware (verified)
 
@@ -101,7 +117,7 @@ scripts/flash.sh /dev/cu.usbmodem1101      # USB
 ## Repository layout
 
 ```
-kubelab-display/
+esp32-homelab-display/
 ├── README.md
 ├── .gitignore
 ├── iy-homelab.yaml              # ESPHome firmware (LVGL dashboard)

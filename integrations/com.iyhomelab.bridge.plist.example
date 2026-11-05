@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  launchd user agent to run the IY HOMELAB metrics bridge at login and keep
+  launchd user agent to run the KUBELAB metrics bridge at login and keep
   it alive. Install:
 
     cp integrations/com.iyhomelab.bridge.plist.example \
@@ -19,7 +19,7 @@
     <array>
         <string>/bin/zsh</string>
         <string>-lc</string>
-        <string>/path/to/kubelab-display/integrations/run-bridge.sh</string>
+        <string>/path/to/esp32-homelab-display/integrations/run-bridge.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

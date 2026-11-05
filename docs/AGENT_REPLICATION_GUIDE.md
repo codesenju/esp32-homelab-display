@@ -1,4 +1,4 @@
-# Agent Replication Guide — IY HOMELAB style ESP32 monitoring display
+# Agent Replication Guide — KUBELAB style ESP32 monitoring display
 
 Audience: an autonomous coding agent asked to build the same thing on a
 **different** person's homelab. This is a procedure, not a script to run blind.
@@ -189,10 +189,16 @@ Reference file is in the repo root; adapt names/entities. Essentials:
 - `sensor:`/`text_sensor:` `platform: homeassistant` entries that subscribe to
   the discovered/created entity IDs, with `on_value:` → render scripts (event
   driven; do not blind-poll).
-- `lvgl:` dark theme, one page per metric group. **Multi-page + button nav:**
-  a `binary_sensor` on the user button (GPIO9 here; `pullup: true, inverted:
-  true` because it's a boot-strap pin) with `on_press:` cycling pages. Keep all
-  pages continuously updated so switching is instant.
+- `lvgl:` dark theme, one page per metric group (this build uses three:
+  CPU %, MEMORY %, TEMP °C). **Multi-page + button nav:** a `binary_sensor` on
+  the user button (GPIO9 here; `pullup: true, inverted: true` because it's a
+  boot-strap pin) with `on_press:` cycling pages via a modulo counter
+  (`active_page = (active_page + 1) % N`). Keep all pages continuously updated
+  so switching is instant, and show an `N/total` page indicator.
+- **Temperature source:** most node APIs (incl. Proxmox) don't expose CPU temp.
+  Read it via `lm-sensors` (`sensors -j`, `coretemp` → `Package id 0`) over SSH
+  from the bridge, publish `sensor.<node>_temperature`, and the firmware
+  subscribes like any other metric. Install `lm-sensors` on nodes that lack it.
 - **On-screen button legend** in the bottom corners matching the physical
   buttons (`< PAGE` for the user button, `RESET >` dimmed for the hw reset).
 - **Connectivity truthfully:** derive "HA connected" from

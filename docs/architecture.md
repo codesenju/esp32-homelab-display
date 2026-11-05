@@ -22,10 +22,17 @@
 
 The Home Assistant instance has no Proxmox, Kubernetes, or NUT/UPS integration
 installed (verified via `GET /api/config` → `components`). Rather than install
-and maintain three HA custom integrations, a single ~250-line Python bridge
-reads the two sources that are actually reachable and publishes plain HA
-sensors. This keeps the moving parts minimal and the ESP firmware unchanged if
-a source is later swapped.
+and maintain HA custom integrations, a single Python bridge reads the reachable
+sources and publishes plain HA sensors:
+
+- **Proxmox API** (read-only token) → per-node CPU %, memory %, status, uptime.
+- **Kubernetes** (`kubectl` / kubeconfig) → ready/total nodes, bad pods, health.
+- **lm-sensors over SSH** → per-node CPU package temperature (°C). Proxmox's
+  API does not expose temperature, so the bridge runs `sensors -j` over SSH on
+  each node (requires `lm-sensors` installed there).
+
+This keeps the moving parts minimal and the ESP firmware unchanged if a source
+is later swapped.
 
 ### Why Home Assistant in the middle (not ESP → Proxmox directly)
 
@@ -38,7 +45,8 @@ a source is later swapped.
 - **Framework:** ESP-IDF (recommended for reliable ESP32-C6 support in ESPHome).
 - **Display:** `mipi_spi` driving an ST7789 at 172×320 with `offset_width: 34`
   (the panel's column offset), `color_order: bgr`, `invert_colors: true`.
-- **UI:** LVGL, two pages, dark theme, colour-coded bars and status dots.
+- **UI:** LVGL, three pages (CPU / MEMORY / TEMP), dark theme, colour-coded
+  bars and status dots.
 - **Event-driven:** metric widgets update from HA `on_value` callbacks, not a
   blind poll. The clock updates once a minute. A 5 s interval only refreshes the
   connectivity footer and runs the staleness watchdog.
@@ -51,17 +59,27 @@ a source is later swapped.
     (`on_press → next_page`, CPU → MEMORY → TEMP → CPU). All pages are kept
     continuously up to date, so switching is instant.
   - A small `CPU 1/3` / `MEM 2/3` / `TEMP 3/3` indicator shows the active page.
-- **Shared rows:** both pages also show Kubernetes health (`K8S <state> R/T`)
-  and the clock / Wi-Fi / HA-connection footer.
+- **Shared rows:** all three pages also show Kubernetes health
+  (`K8S <state> R/T`) and the clock / Wi-Fi / HA-connection footer.
 
 ## Health & staleness logic
 
-| State | Meaning | Colour |
-|-------|---------|--------|
+The **status dot** per node reflects overall health; each page's **bar** is
+coloured by that page's own metric.
+
+| State | Dot meaning (status + worst of CPU/MEM) | Colour |
+|-------|------------------------------------------|--------|
 | Healthy | node online, worst(cpu,mem) < 60 % | green `0x66D9A0` |
 | Warning | worst(cpu,mem) 60–85 % | amber `0xF4C14E` |
 | Critical | worst(cpu,mem) ≥ 85 %, or node `offline` | red `0xE8564B` |
 | Unknown | missing/`unavailable` metric, or stale, or API down | grey `0x829AA8` |
+
+Per-page **bar** thresholds:
+
+| Page | green | amber | red |
+|------|-------|-------|-----|
+| CPU %, MEMORY % | < 60 | 60–85 | ≥ 85 |
+| TEMP °C | < 70 | 70–85 | ≥ 85 |
 
 - A node is **never** shown healthy just because an old CPU value was low: the
   dot colour requires `status == online` and uses the *worst* of CPU/MEM.

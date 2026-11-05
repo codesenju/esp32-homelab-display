@@ -45,9 +45,14 @@ Serial port (macOS): /dev/cu.usbmodem1101
 - **BOOT (GPIO9):** used as the page-switch button. GPIO9 is the boot-strap
   pin; at runtime it idles HIGH (internal pull-up) and reads LOW when pressed,
   so the firmware configures it `pullup: true, inverted: true`. Each press
-  fires `on_press → next_page`, cycling **CPU → MEMORY → CPU**. It's exposed to
-  Home Assistant as `binary_sensor.iy_homelab_display_page_button`.
+  fires `on_press → next_page`, cycling **CPU → MEMORY → TEMP → CPU**. It's
+  exposed to Home Assistant as `binary_sensor.iy_homelab_display_page_button`.
 - **RESET:** hardware reset only; not software-readable.
+
+> **Naming note:** the ESPHome device `name:` is `iy-homelab-display`, so Home
+> Assistant entity IDs are prefixed `iy_homelab_display_*`. The on-screen title
+> shows **KUBELAB**. These are intentionally independent — renaming the display
+> title does not change the device name or its HA entity IDs.
 
 ## Backlight
 
