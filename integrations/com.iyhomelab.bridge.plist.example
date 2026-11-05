@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd user agent to run the IY HOMELAB metrics bridge at login and keep
+  it alive. Install:
+
+    cp integrations/com.iyhomelab.bridge.plist.example \
+       ~/Library/LaunchAgents/com.iyhomelab.bridge.plist
+    # edit the two absolute paths below if your repo lives elsewhere
+    launchctl load -w ~/Library/LaunchAgents/com.iyhomelab.bridge.plist
+
+  The wrapper script integrations/run-bridge.sh sources bridge.env (secrets)
+  so no credentials live inside this plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.iyhomelab.bridge</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-lc</string>
+        <string>/path/to/kubelab-display/integrations/run-bridge.sh</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/iy-homelab-bridge.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/iy-homelab-bridge.err</string>
+</dict>
+</plist>

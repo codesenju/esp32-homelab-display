@@ -1,0 +1,455 @@
+## IY HOMELAB — ESP32-C6-LCD-1.47-M monitoring display
+## Waveshare ESP32-C6-LCD-1.47 (ST7789, 172x320) | 8MB flash | ESP-IDF
+## Metrics are supplied by integrations/proxmox_bridge.py into Home Assistant;
+## this firmware subscribes to those HA entities over the encrypted native API.
+##
+## Two pages, switched with the on-board BOOT button (GPIO9):
+##   Page 1: PROXMOX - CPU     (per-node CPU %, colour-coded bars)
+##   Page 2: PROXMOX - MEMORY  (per-node RAM %, colour-coded bars)
+## Both pages also show Kubernetes cluster health and the clock/connectivity.
+
+substitutions:
+  name: iy-homelab-display
+  friendly_name: IY Homelab Display
+  # Staleness threshold (seconds): if no metric update arrives within this
+  # window the display marks data as stale/unknown rather than trusting it.
+  stale_after: "90"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      - light.turn_on:
+          id: lcd_backlight
+          brightness: 40%
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+# 8MB flash gives two ~3.75MB OTA app slots (app0/app1) -> OTA fully supported.
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s   # do not auto-reboot when HA is briefly unreachable
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "IY-HOMELAB Fallback"
+    password: !secret ota_password
+
+captive_portal:
+
+time:
+  - platform: sntp
+    id: local_clock
+    timezone: Africa/Johannesburg
+    on_time:
+      - seconds: 0
+        then:
+          - script.execute: refresh_clock
+
+globals:
+  - id: last_node_update
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: last_k8s_update
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  # current page: 0 = CPU, 1 = MEMORY
+  - id: active_page
+    type: int
+    restore_value: no
+    initial_value: "0"
+
+spi:
+  clk_pin: GPIO7
+  mosi_pin: GPIO6
+
+output:
+  - platform: ledc
+    pin: GPIO22
+    id: lcd_bl
+
+light:
+  - platform: monochromatic
+    id: lcd_backlight
+    name: LCD Backlight
+    output: lcd_bl
+    restore_mode: ALWAYS_OFF
+
+## ---------------------------------------------------------------------------
+## On-board BOOT button (GPIO9) cycles between the CPU and MEMORY pages.
+## GPIO9 is the ESP32-C6 boot-strap pin; after boot it reads HIGH idle and is
+## pulled LOW when the button is pressed (hence inverted + internal pullup).
+## ---------------------------------------------------------------------------
+binary_sensor:
+  - platform: gpio
+    id: boot_button
+    name: Page Button
+    pin:
+      number: GPIO9
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    on_press:
+      - script.execute: next_page
+
+display:
+  - platform: mipi_spi
+    id: main_display
+    model: ST7789V
+    dimensions:
+      width: 172
+      height: 320
+      offset_width: 34
+      offset_height: 0
+    cs_pin: GPIO14
+    dc_pin: GPIO15
+    reset_pin: GPIO21
+    spi_mode: MODE3
+    data_rate: 40MHz
+    color_order: bgr
+    color_depth: 16
+    invert_colors: true
+    auto_clear_enabled: false
+    update_interval: never
+
+## ---------------------------------------------------------------------------
+## Home Assistant entity subscriptions (event driven via on_value)
+## ---------------------------------------------------------------------------
+sensor:
+  - platform: homeassistant
+    id: node1_cpu
+    entity_id: sensor.kubelab_1_cpu_usage
+    on_value:
+      then:
+        - lambda: 'id(last_node_update) = (uint32_t) (millis() / 1000);'
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node2_cpu
+    entity_id: sensor.kubelab_2_cpu_usage
+    on_value:
+      then:
+        - lambda: 'id(last_node_update) = (uint32_t) (millis() / 1000);'
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node3_cpu
+    entity_id: sensor.kubelab_3_cpu_usage
+    on_value:
+      then:
+        - lambda: 'id(last_node_update) = (uint32_t) (millis() / 1000);'
+        - script.execute: refresh_nodes
+
+  - platform: homeassistant
+    id: node1_mem
+    entity_id: sensor.kubelab_1_memory_usage
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node2_mem
+    entity_id: sensor.kubelab_2_memory_usage
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node3_mem
+    entity_id: sensor.kubelab_3_memory_usage
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+
+  - platform: homeassistant
+    id: k8s_ready
+    entity_id: sensor.homelab_kubernetes_nodes_ready
+    on_value:
+      then:
+        - lambda: 'id(last_k8s_update) = (uint32_t) (millis() / 1000);'
+        - script.execute: refresh_k8s
+  - platform: homeassistant
+    id: k8s_total
+    entity_id: sensor.homelab_kubernetes_nodes_total
+  - platform: homeassistant
+    id: k8s_pods_bad
+    entity_id: sensor.homelab_kubernetes_pods_not_ready
+
+text_sensor:
+  - platform: homeassistant
+    id: node1_status
+    entity_id: sensor.kubelab_1_status
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node2_status
+    entity_id: sensor.kubelab_2_status
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node3_status
+    entity_id: sensor.kubelab_3_status
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: k8s_health
+    entity_id: sensor.homelab_kubernetes_health
+    on_value:
+      then:
+        - script.execute: refresh_k8s
+
+## ---------------------------------------------------------------------------
+## Render scripts. Both pages are always kept current so switching is instant.
+## ---------------------------------------------------------------------------
+script:
+  - id: refresh_clock
+    then:
+      - lambda: |-
+          auto t = id(local_clock).now();
+          std::string s = t.is_valid() ? t.strftime("%H:%M") : std::string("--:--");
+          lv_label_set_text(id(cpu_clock), s.c_str());
+          lv_label_set_text(id(mem_clock), s.c_str());
+
+  # Renders all three node rows on BOTH pages: CPU values on page 1, memory on
+  # page 2. The status dot colour reflects node health (down/unknown/load).
+  - id: refresh_nodes
+    then:
+      - lambda: |-
+          const char* names[3] = {"kubelab-1", "kubelab-2", "kubelab-3"};
+          float cpu[3]  = {id(node1_cpu).state, id(node2_cpu).state, id(node3_cpu).state};
+          float mem[3]  = {id(node1_mem).state, id(node2_mem).state, id(node3_mem).state};
+          std::string st[3] = {id(node1_status).state, id(node2_status).state, id(node3_status).state};
+          lv_obj_t* cpu_lbl[3] = {id(c1_label), id(c2_label), id(c3_label)};
+          lv_obj_t* cpu_bar[3] = {id(c1_bar),   id(c2_bar),   id(c3_bar)};
+          lv_obj_t* cpu_dot[3] = {id(c1_dot),   id(c2_dot),   id(c3_dot)};
+          lv_obj_t* mem_lbl[3] = {id(m1_label), id(m2_label), id(m3_label)};
+          lv_obj_t* mem_bar[3] = {id(m1_bar),   id(m2_bar),   id(m3_bar)};
+          lv_obj_t* mem_dot[3] = {id(m1_dot),   id(m2_dot),   id(m3_dot)};
+
+          for (int i = 0; i < 3; i++) {
+            bool online = (st[i] == "online");
+            bool down   = (st[i] == "offline");
+            // ---- dot colour: health by node status + worst of cpu/mem ----
+            bool kc = online && !std::isnan(cpu[i]);
+            bool km = online && !std::isnan(mem[i]);
+            uint32_t dcol;
+            if (down)                 dcol = 0xE8564B;            // critical
+            else if (!kc && !km)      dcol = 0x829AA8;            // unknown
+            else {
+              float worst = 0;
+              if (kc) worst = cpu[i];
+              if (km && mem[i] > worst) worst = mem[i];
+              dcol = worst >= 85 ? 0xE8564B : (worst >= 60 ? 0xF4C14E : 0x66D9A0);
+            }
+            lv_obj_set_style_text_color(cpu_dot[i], lv_color_hex(dcol), 0);
+            lv_obj_set_style_text_color(mem_dot[i], lv_color_hex(dcol), 0);
+
+            // ---- CPU row ----
+            char b[40];
+            if (kc)        snprintf(b, sizeof(b), "%s  %.0f%%", names[i], cpu[i]);
+            else if (down) snprintf(b, sizeof(b), "%s  DOWN", names[i]);
+            else           snprintf(b, sizeof(b), "%s  --", names[i]);
+            lv_label_set_text(cpu_lbl[i], b);
+            uint32_t ccol = !kc ? dcol : (cpu[i] >= 85 ? 0xE8564B
+                           : (cpu[i] >= 60 ? 0xF4C14E : 0x66D9A0));
+            lv_bar_set_value(cpu_bar[i], kc ? (int)cpu[i] : 0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(cpu_bar[i], lv_color_hex(ccol), (int)LV_PART_INDICATOR);
+
+            // ---- MEMORY row ----
+            if (km)        snprintf(b, sizeof(b), "%s  %.0f%%", names[i], mem[i]);
+            else if (down) snprintf(b, sizeof(b), "%s  DOWN", names[i]);
+            else           snprintf(b, sizeof(b), "%s  --", names[i]);
+            lv_label_set_text(mem_lbl[i], b);
+            uint32_t mcol = !km ? dcol : (mem[i] >= 85 ? 0xE8564B
+                           : (mem[i] >= 60 ? 0xF4C14E : 0x66D9A0));
+            lv_bar_set_value(mem_bar[i], km ? (int)mem[i] : 0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(mem_bar[i], lv_color_hex(mcol), (int)LV_PART_INDICATOR);
+          }
+
+  - id: refresh_k8s
+    then:
+      - lambda: |-
+          std::string h = id(k8s_health).state;
+          uint32_t col = 0x829AA8;
+          std::string txt = "K8S --";
+          if (!h.empty() && h != "unknown" && h != "unavailable") {
+            if (h == "Healthy")       col = 0x66D9A0;
+            else if (h == "Degraded") col = 0xF4C14E;
+            else if (h == "Critical") col = 0xE8564B;
+            char b[32];
+            if (!std::isnan(id(k8s_ready).state) && !std::isnan(id(k8s_total).state))
+              snprintf(b, sizeof(b), "K8S %s %.0f/%.0f", h.c_str(),
+                       id(k8s_ready).state, id(k8s_total).state);
+            else
+              snprintf(b, sizeof(b), "K8S %s", h.c_str());
+            txt = b;
+          }
+          lv_label_set_text(id(cpu_k8s_label), txt.c_str());
+          lv_label_set_text(id(mem_k8s_label), txt.c_str());
+          lv_obj_set_style_text_color(id(cpu_k8s_dot), lv_color_hex(col), 0);
+          lv_obj_set_style_text_color(id(mem_k8s_dot), lv_color_hex(col), 0);
+
+  # Switch to the next page (wraps CPU <-> MEMORY).
+  - id: next_page
+    then:
+      - lambda: 'id(active_page) = (id(active_page) + 1) % 2;'
+      - script.execute: show_active_page
+
+  - id: show_active_page
+    then:
+      - if:
+          condition:
+            lambda: 'return id(active_page) == 0;'
+          then:
+            - lvgl.page.show: cpu_page
+          else:
+            - lvgl.page.show: mem_page
+
+## ---------------------------------------------------------------------------
+## Connectivity footer + staleness watchdog (updates both pages)
+## ---------------------------------------------------------------------------
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          bool ha = api::global_api_server != nullptr &&
+                    api::global_api_server->is_connected();
+          bool wifi = wifi::global_wifi_component != nullptr &&
+                      wifi::global_wifi_component->is_connected();
+          const char* stxt = ha ? "HA connected" : (wifi ? "WiFi only" : "Offline");
+          uint32_t scol = ha ? 0x66D9A0 : (wifi ? 0xF4C14E : 0xE8564B);
+          lv_label_set_text(id(cpu_status), stxt);
+          lv_label_set_text(id(mem_status), stxt);
+          lv_obj_set_style_text_color(id(cpu_status), lv_color_hex(scol), 0);
+          lv_obj_set_style_text_color(id(mem_status), lv_color_hex(scol), 0);
+
+          const char* wtxt = wifi ? "WiFi" : "----";
+          uint32_t wcol = wifi ? 0x75D8FD : 0x829AA8;
+          lv_label_set_text(id(cpu_wifi), wtxt);
+          lv_label_set_text(id(mem_wifi), wtxt);
+          lv_obj_set_style_text_color(id(cpu_wifi), lv_color_hex(wcol), 0);
+          lv_obj_set_style_text_color(id(mem_wifi), lv_color_hex(wcol), 0);
+
+          // Staleness -> grey out node dots on both pages.
+          uint32_t now = (uint32_t)(millis() / 1000);
+          if (!ha || (id(last_node_update) > 0 &&
+                      now - id(last_node_update) > ${stale_after})) {
+            lv_obj_t* dots[6] = {id(c1_dot), id(c2_dot), id(c3_dot),
+                                 id(m1_dot), id(m2_dot), id(m3_dot)};
+            for (int i = 0; i < 6; i++)
+              lv_obj_set_style_text_color(dots[i], lv_color_hex(0x829AA8), 0);
+          }
+          if (!ha || (id(last_k8s_update) > 0 &&
+                      now - id(last_k8s_update) > ${stale_after})) {
+            lv_obj_set_style_text_color(id(cpu_k8s_dot), lv_color_hex(0x829AA8), 0);
+            lv_obj_set_style_text_color(id(mem_k8s_dot), lv_color_hex(0x829AA8), 0);
+          }
+
+## ---------------------------------------------------------------------------
+## Fonts. The default Montserrat glyph set has no U+25CF (●); we build a small
+## font that explicitly includes it so the status dots render instead of a
+## missing-glyph box.
+## ---------------------------------------------------------------------------
+font:
+  - id: dot_font
+    file: "gfonts://Montserrat@700"
+    size: 20
+    glyphs: ["\U00002022"]   # • BULLET (present in text fonts)
+
+## ---------------------------------------------------------------------------
+## LVGL — two pages (CPU / MEMORY) for 172x320 portrait.
+## Press the BOOT button (GPIO9) to switch pages.
+## ---------------------------------------------------------------------------
+lvgl:
+  buffer_size: 25%
+  color_depth: 16
+  bg_color: 0x0E1420
+  text_color: 0xE8F2FA
+  pages:
+    # ======================= PAGE 1: CPU =======================
+    - id: cpu_page
+      widgets:
+        - label: { text: "IY HOMELAB", x: 10, y: 8, text_color: 0x75D8FD, text_font: montserrat_16 }
+        - label: { id: cpu_wifi, text: "----", x: 128, y: 10, text_color: 0x829AA8, text_font: montserrat_12 }
+        - label: { id: cpu_clock, text: "--:--", x: 10, y: 34, text_font: montserrat_22 }
+        # page indicator
+        - label: { text: "CPU  1/2", x: 104, y: 44, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - line:  { points: [[10, 66], [162, 66]], line_color: 0x27313F, line_width: 1 }
+        - label: { text: "PROXMOX - CPU %", x: 10, y: 72, text_color: 0x66D9A0, text_font: montserrat_12 }
+
+        - label: { id: c1_dot, text: "\u2022", x: 10, y: 92,  text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: c1_label, text: "kubelab-1  --", x: 26, y: 92, text_font: montserrat_14 }
+        - bar:   { id: c1_bar, x: 10, y: 112, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - label: { id: c2_dot, text: "\u2022", x: 10, y: 128, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: c2_label, text: "kubelab-2  --", x: 26, y: 128, text_font: montserrat_14 }
+        - bar:   { id: c2_bar, x: 10, y: 148, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - label: { id: c3_dot, text: "\u2022", x: 10, y: 164, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: c3_label, text: "kubelab-3  --", x: 26, y: 164, text_font: montserrat_14 }
+        - bar:   { id: c3_bar, x: 10, y: 184, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - line:  { points: [[10, 206], [162, 206]], line_color: 0x27313F, line_width: 1 }
+        - label: { id: cpu_k8s_dot, text: "\u2022", x: 10, y: 218, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: cpu_k8s_label, text: "K8S --", x: 26, y: 218, text_font: montserrat_14 }
+
+        - label: { id: cpu_status, text: "Starting...", x: 10, y: 252, text_color: 0x829AA8, text_font: montserrat_12 }
+
+        # --- button legend along the bottom edge (matches physical buttons) ---
+        - line:  { points: [[10, 286], [162, 286]], line_color: 0x27313F, line_width: 1 }
+        - label: { text: "< PAGE", x: 10, y: 294, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - label: { text: "RESET >", x: 108, y: 294, text_color: 0x5A6B78, text_font: montserrat_12 }
+
+    # ======================= PAGE 2: MEMORY =======================
+    - id: mem_page
+      widgets:
+        - label: { text: "IY HOMELAB", x: 10, y: 8, text_color: 0x75D8FD, text_font: montserrat_16 }
+        - label: { id: mem_wifi, text: "----", x: 128, y: 10, text_color: 0x829AA8, text_font: montserrat_12 }
+        - label: { id: mem_clock, text: "--:--", x: 10, y: 34, text_font: montserrat_22 }
+        - label: { text: "MEM  2/2", x: 104, y: 44, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - line:  { points: [[10, 66], [162, 66]], line_color: 0x27313F, line_width: 1 }
+        - label: { text: "PROXMOX - MEMORY %", x: 10, y: 72, text_color: 0xB58BF0, text_font: montserrat_12 }
+
+        - label: { id: m1_dot, text: "\u2022", x: 10, y: 92,  text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: m1_label, text: "kubelab-1  --", x: 26, y: 92, text_font: montserrat_14 }
+        - bar:   { id: m1_bar, x: 10, y: 112, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - label: { id: m2_dot, text: "\u2022", x: 10, y: 128, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: m2_label, text: "kubelab-2  --", x: 26, y: 128, text_font: montserrat_14 }
+        - bar:   { id: m2_bar, x: 10, y: 148, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - label: { id: m3_dot, text: "\u2022", x: 10, y: 164, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: m3_label, text: "kubelab-3  --", x: 26, y: 164, text_font: montserrat_14 }
+        - bar:   { id: m3_bar, x: 10, y: 184, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - line:  { points: [[10, 206], [162, 206]], line_color: 0x27313F, line_width: 1 }
+        - label: { id: mem_k8s_dot, text: "\u2022", x: 10, y: 218, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: mem_k8s_label, text: "K8S --", x: 26, y: 218, text_font: montserrat_14 }
+
+        - label: { id: mem_status, text: "Starting...", x: 10, y: 252, text_color: 0x829AA8, text_font: montserrat_12 }
+
+        # --- button legend along the bottom edge (matches physical buttons) ---
+        - line:  { points: [[10, 286], [162, 286]], line_color: 0x27313F, line_width: 1 }
+        - label: { text: "< PAGE", x: 10, y: 294, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - label: { text: "RESET >", x: 108, y: 294, text_color: 0x5A6B78, text_font: montserrat_12 }

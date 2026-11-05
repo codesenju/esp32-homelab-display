@@ -1,0 +1,23 @@
+# Secrets — never commit
+secrets.yaml
+.env
+*.pem
+*.key
+*_token
+bridge.env
+
+# ESPHome build artifacts
+.esphome/
+*.bin
+*.elf
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local state / scratch
+*.log
+ha_states.json
+.DS_Store
