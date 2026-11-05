@@ -3,40 +3,42 @@
 An always-on monitoring dashboard for the **IY HOMELAB** running on a
 **Waveshare ESP32-C6-LCD-1.47-M** (1.47" ST7789, 172×320, 8 MB flash).
 
-The display shows live Proxmox cluster CPU usage, node health, Kubernetes
-cluster health, UPS battery (when available), Wi-Fi / Home Assistant
-connectivity, and the current Johannesburg time.
+The display shows live Proxmox cluster CPU usage, memory usage, node
+temperature, node health, Kubernetes cluster health, Wi-Fi / Home Assistant
+connectivity, and the current Johannesburg time. Three button-switchable pages:
+**CPU**, **MEMORY**, and **TEMP**.
 
 > **New here?** Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) for a plain-language
 > explanation. Replicating this on another homelab (human or agent)? Follow
 > [`docs/AGENT_REPLICATION_GUIDE.md`](docs/AGENT_REPLICATION_GUIDE.md).
 
 ```
-┌─────────────────────┐
-│ IY HOMELAB     WiFi │
-│ 14:15               │
-├─────────────────────┤
-│ PROXMOX CLUSTER     │
-│ ● kubelab-1   24%   │
-│ ███████░░░░░░░░░░   │
-│ ● kubelab-2   38%   │
-│ ██████████░░░░░░    │
-│ ● kubelab-3   16%   │
-│ ████░░░░░░░░░░░░░   │
-├─────────────────────┤
-│ ● K8S Degraded 6/6  │
-│ UPS --              │
-├─────────────────────┤
-│ HA connected        │
-└─────────────────────┘
+  Page 1: CPU            Page 2: MEMORY         Page 3: TEMP
+┌─────────────────────┐┌─────────────────────┐┌─────────────────────┐
+│ KUBELAB    15:13 WiFi││ KUBELAB    15:13 WiFi││ KUBELAB    15:13 WiFi│
+│             CPU  1/3 ││             MEM  2/3 ││            TEMP  3/3 │
+├─────────────────────┤├─────────────────────┤├─────────────────────┤
+│ PROXMOX - CPU %     ││ PROXMOX - MEMORY %  ││ PROXMOX - TEMP C    │
+│ ● kubelab-1   24%   ││ ● kubelab-1   80%   ││ ● kubelab-1   83C   │
+│ ███████░░░░░░░░░░   ││ █████████████░░░   ││ █████████████░░░   │
+│ ● kubelab-2   38%   ││ ● kubelab-2   81%   ││ ● kubelab-2   73C   │
+│ ██████████░░░░░░    ││ █████████████░░░   ││ ███████████░░░░░   │
+│ ● kubelab-3   16%   ││ ● kubelab-3   80%   ││ ● kubelab-3   70C   │
+│ ████░░░░░░░░░░░░░   ││ █████████████░░░   ││ ███████████░░░░░   │
+├─────────────────────┤├─────────────────────┤├─────────────────────┤
+│ ● K8S Degraded 6/6  ││ ● K8S Degraded 6/6  ││ ● K8S Degraded 6/6  │
+├─────────────────────┤├─────────────────────┤├─────────────────────┤
+│ HA connected        ││ HA connected        ││ HA connected        │
+│ < PAGE      RESET > ││ < PAGE      RESET > ││ < PAGE      RESET > │
+└─────────────────────┘└─────────────────────┘└─────────────────────┘
 ```
 
 ## How it works
 
 ```
 Proxmox API (read-only token) ─┐
-                               ├─► metrics bridge ─► Home Assistant ─► (native ESPHome API, encrypted) ─► ESP32-C6 LCD
-Kubernetes (kubeconfig) ───────┘        (Mac)          (sensors)
+Kubernetes (kubeconfig) ───────┼─► metrics bridge ─► Home Assistant ─► (native ESPHome API, encrypted) ─► ESP32-C6 LCD
+lm-sensors over SSH ───────────┘        (Mac)          (sensors)
 ```
 
 The ESP32 holds **no** credentials for Proxmox/K8s/HA. It only speaks the

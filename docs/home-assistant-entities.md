@@ -45,6 +45,17 @@ during the build.
 | `sensor.kubelab_2_status`       | str | `online` | |
 | `sensor.kubelab_3_status`       | str | `online` | |
 
+### Node temperature (source: lm-sensors over SSH, CPU package temp)
+
+| Entity ID | Type | Sample value | Notes |
+|-----------|------|--------------|-------|
+| `sensor.kubelab_1_temperature` | °C | `83` | `coretemp` Package id 0 |
+| `sensor.kubelab_2_temperature` | °C | `73` | |
+| `sensor.kubelab_3_temperature` | °C | `70` | lm-sensors installed during the temp-page addition |
+
+> Proxmox's API does not expose CPU/node temperature, so the bridge reads it via
+> `sensors -j` over SSH. Requires `lm-sensors` on each node.
+
 ### Kubernetes (source: `kubectl` via local kubeconfig)
 
 | Entity ID | Type | Sample value | Notes |

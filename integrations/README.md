@@ -11,6 +11,7 @@ entities over the encrypted ESPHome API.
 | `sensor.kubelab_{1,2,3}_cpu_usage` | Proxmox API | % |
 | `sensor.kubelab_{1,2,3}_memory_usage` | Proxmox API | % |
 | `sensor.kubelab_{1,2,3}_status` | Proxmox API | online/offline |
+| `sensor.kubelab_{1,2,3}_temperature` | lm-sensors over SSH | °C (CPU package) |
 | `sensor.homelab_kubernetes_health` | kubectl | Healthy/Degraded/Critical |
 | `sensor.homelab_kubernetes_nodes_ready` | kubectl | nodes |
 | `sensor.homelab_kubernetes_nodes_total` | kubectl | nodes |

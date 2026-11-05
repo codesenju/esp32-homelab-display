@@ -180,6 +180,25 @@ sensor:
         - script.execute: refresh_nodes
 
   - platform: homeassistant
+    id: node1_temp
+    entity_id: sensor.kubelab_1_temperature
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node2_temp
+    entity_id: sensor.kubelab_2_temperature
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+  - platform: homeassistant
+    id: node3_temp
+    entity_id: sensor.kubelab_3_temperature
+    on_value:
+      then:
+        - script.execute: refresh_nodes
+
+  - platform: homeassistant
     id: k8s_ready
     entity_id: sensor.homelab_kubernetes_nodes_ready
     on_value:
@@ -230,6 +249,7 @@ script:
           std::string s = t.is_valid() ? t.strftime("%H:%M") : std::string("--:--");
           lv_label_set_text(id(cpu_clock), s.c_str());
           lv_label_set_text(id(mem_clock), s.c_str());
+          lv_label_set_text(id(tmp_clock), s.c_str());
 
   # Renders all three node rows on BOTH pages: CPU values on page 1, memory on
   # page 2. The status dot colour reflects node health (down/unknown/load).
@@ -239,6 +259,7 @@ script:
           const char* names[3] = {"kubelab-1", "kubelab-2", "kubelab-3"};
           float cpu[3]  = {id(node1_cpu).state, id(node2_cpu).state, id(node3_cpu).state};
           float mem[3]  = {id(node1_mem).state, id(node2_mem).state, id(node3_mem).state};
+          float tmp[3]  = {id(node1_temp).state, id(node2_temp).state, id(node3_temp).state};
           std::string st[3] = {id(node1_status).state, id(node2_status).state, id(node3_status).state};
           lv_obj_t* cpu_lbl[3] = {id(c1_label), id(c2_label), id(c3_label)};
           lv_obj_t* cpu_bar[3] = {id(c1_bar),   id(c2_bar),   id(c3_bar)};
@@ -246,6 +267,9 @@ script:
           lv_obj_t* mem_lbl[3] = {id(m1_label), id(m2_label), id(m3_label)};
           lv_obj_t* mem_bar[3] = {id(m1_bar),   id(m2_bar),   id(m3_bar)};
           lv_obj_t* mem_dot[3] = {id(m1_dot),   id(m2_dot),   id(m3_dot)};
+          lv_obj_t* tmp_lbl[3] = {id(t1_label), id(t2_label), id(t3_label)};
+          lv_obj_t* tmp_bar[3] = {id(t1_bar),   id(t2_bar),   id(t3_bar)};
+          lv_obj_t* tmp_dot[3] = {id(t1_dot),   id(t2_dot),   id(t3_dot)};
 
           for (int i = 0; i < 3; i++) {
             bool online = (st[i] == "online");
@@ -264,6 +288,7 @@ script:
             }
             lv_obj_set_style_text_color(cpu_dot[i], lv_color_hex(dcol), 0);
             lv_obj_set_style_text_color(mem_dot[i], lv_color_hex(dcol), 0);
+            lv_obj_set_style_text_color(tmp_dot[i], lv_color_hex(dcol), 0);
 
             // ---- CPU row ----
             char b[40];
@@ -285,6 +310,18 @@ script:
                            : (mem[i] >= 60 ? 0xF4C14E : 0x66D9A0));
             lv_bar_set_value(mem_bar[i], km ? (int)mem[i] : 0, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(mem_bar[i], lv_color_hex(mcol), (int)LV_PART_INDICATOR);
+
+            // ---- TEMPERATURE row (CPU package °C) ----
+            // Bar scales 0-100C; colour: <70 green, 70-85 amber, >=85 red.
+            bool kt = online && !std::isnan(tmp[i]);
+            if (kt)        snprintf(b, sizeof(b), "%s  %.0fC", names[i], tmp[i]);
+            else if (down) snprintf(b, sizeof(b), "%s  DOWN", names[i]);
+            else           snprintf(b, sizeof(b), "%s  --", names[i]);
+            lv_label_set_text(tmp_lbl[i], b);
+            uint32_t tcol = !kt ? dcol : (tmp[i] >= 85 ? 0xE8564B
+                           : (tmp[i] >= 70 ? 0xF4C14E : 0x66D9A0));
+            lv_bar_set_value(tmp_bar[i], kt ? (int)tmp[i] : 0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(tmp_bar[i], lv_color_hex(tcol), (int)LV_PART_INDICATOR);
           }
 
   - id: refresh_k8s
@@ -307,13 +344,15 @@ script:
           }
           lv_label_set_text(id(cpu_k8s_label), txt.c_str());
           lv_label_set_text(id(mem_k8s_label), txt.c_str());
+          lv_label_set_text(id(tmp_k8s_label), txt.c_str());
           lv_obj_set_style_text_color(id(cpu_k8s_dot), lv_color_hex(col), 0);
           lv_obj_set_style_text_color(id(mem_k8s_dot), lv_color_hex(col), 0);
+          lv_obj_set_style_text_color(id(tmp_k8s_dot), lv_color_hex(col), 0);
 
-  # Switch to the next page (wraps CPU <-> MEMORY).
+  # Switch to the next page (cycles CPU -> MEMORY -> TEMP -> CPU).
   - id: next_page
     then:
-      - lambda: 'id(active_page) = (id(active_page) + 1) % 2;'
+      - lambda: 'id(active_page) = (id(active_page) + 1) % 3;'
       - script.execute: show_active_page
 
   - id: show_active_page
@@ -324,7 +363,13 @@ script:
           then:
             - lvgl.page.show: cpu_page
           else:
-            - lvgl.page.show: mem_page
+            - if:
+                condition:
+                  lambda: 'return id(active_page) == 1;'
+                then:
+                  - lvgl.page.show: mem_page
+                else:
+                  - lvgl.page.show: tmp_page
 
 ## ---------------------------------------------------------------------------
 ## Connectivity footer + staleness watchdog (updates both pages)
@@ -341,29 +386,35 @@ interval:
           uint32_t scol = ha ? 0x66D9A0 : (wifi ? 0xF4C14E : 0xE8564B);
           lv_label_set_text(id(cpu_status), stxt);
           lv_label_set_text(id(mem_status), stxt);
+          lv_label_set_text(id(tmp_status), stxt);
           lv_obj_set_style_text_color(id(cpu_status), lv_color_hex(scol), 0);
           lv_obj_set_style_text_color(id(mem_status), lv_color_hex(scol), 0);
+          lv_obj_set_style_text_color(id(tmp_status), lv_color_hex(scol), 0);
 
           const char* wtxt = wifi ? "WiFi" : "----";
           uint32_t wcol = wifi ? 0x75D8FD : 0x829AA8;
           lv_label_set_text(id(cpu_wifi), wtxt);
           lv_label_set_text(id(mem_wifi), wtxt);
+          lv_label_set_text(id(tmp_wifi), wtxt);
           lv_obj_set_style_text_color(id(cpu_wifi), lv_color_hex(wcol), 0);
           lv_obj_set_style_text_color(id(mem_wifi), lv_color_hex(wcol), 0);
+          lv_obj_set_style_text_color(id(tmp_wifi), lv_color_hex(wcol), 0);
 
-          // Staleness -> grey out node dots on both pages.
+          // Staleness -> grey out node dots on all pages.
           uint32_t now = (uint32_t)(millis() / 1000);
           if (!ha || (id(last_node_update) > 0 &&
                       now - id(last_node_update) > ${stale_after})) {
-            lv_obj_t* dots[6] = {id(c1_dot), id(c2_dot), id(c3_dot),
-                                 id(m1_dot), id(m2_dot), id(m3_dot)};
-            for (int i = 0; i < 6; i++)
+            lv_obj_t* dots[9] = {id(c1_dot), id(c2_dot), id(c3_dot),
+                                 id(m1_dot), id(m2_dot), id(m3_dot),
+                                 id(t1_dot), id(t2_dot), id(t3_dot)};
+            for (int i = 0; i < 9; i++)
               lv_obj_set_style_text_color(dots[i], lv_color_hex(0x829AA8), 0);
           }
           if (!ha || (id(last_k8s_update) > 0 &&
                       now - id(last_k8s_update) > ${stale_after})) {
             lv_obj_set_style_text_color(id(cpu_k8s_dot), lv_color_hex(0x829AA8), 0);
             lv_obj_set_style_text_color(id(mem_k8s_dot), lv_color_hex(0x829AA8), 0);
+            lv_obj_set_style_text_color(id(tmp_k8s_dot), lv_color_hex(0x829AA8), 0);
           }
 
 ## ---------------------------------------------------------------------------
@@ -390,11 +441,11 @@ lvgl:
     # ======================= PAGE 1: CPU =======================
     - id: cpu_page
       widgets:
-        - label: { text: "IY HOMELAB", x: 10, y: 8, text_color: 0x75D8FD, text_font: montserrat_16 }
+        - label: { text: "KUBELAB", x: 10, y: 8, text_color: 0x75D8FD, text_font: montserrat_16 }
         - label: { id: cpu_wifi, text: "----", x: 128, y: 10, text_color: 0x829AA8, text_font: montserrat_12 }
         - label: { id: cpu_clock, text: "--:--", x: 10, y: 34, text_font: montserrat_22 }
         # page indicator
-        - label: { text: "CPU  1/2", x: 104, y: 44, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - label: { text: "CPU 1/3", x: 104, y: 44, text_color: 0x75D8FD, text_font: montserrat_12 }
         - line:  { points: [[10, 66], [162, 66]], line_color: 0x27313F, line_width: 1 }
         - label: { text: "PROXMOX - CPU %", x: 10, y: 72, text_color: 0x66D9A0, text_font: montserrat_12 }
 
@@ -424,10 +475,10 @@ lvgl:
     # ======================= PAGE 2: MEMORY =======================
     - id: mem_page
       widgets:
-        - label: { text: "IY HOMELAB", x: 10, y: 8, text_color: 0x75D8FD, text_font: montserrat_16 }
+        - label: { text: "KUBELAB", x: 10, y: 8, text_color: 0x75D8FD, text_font: montserrat_16 }
         - label: { id: mem_wifi, text: "----", x: 128, y: 10, text_color: 0x829AA8, text_font: montserrat_12 }
         - label: { id: mem_clock, text: "--:--", x: 10, y: 34, text_font: montserrat_22 }
-        - label: { text: "MEM  2/2", x: 104, y: 44, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - label: { text: "MEM 2/3", x: 104, y: 44, text_color: 0x75D8FD, text_font: montserrat_12 }
         - line:  { points: [[10, 66], [162, 66]], line_color: 0x27313F, line_width: 1 }
         - label: { text: "PROXMOX - MEMORY %", x: 10, y: 72, text_color: 0xB58BF0, text_font: montserrat_12 }
 
@@ -448,6 +499,39 @@ lvgl:
         - label: { id: mem_k8s_label, text: "K8S --", x: 26, y: 218, text_font: montserrat_14 }
 
         - label: { id: mem_status, text: "Starting...", x: 10, y: 252, text_color: 0x829AA8, text_font: montserrat_12 }
+
+        # --- button legend along the bottom edge (matches physical buttons) ---
+        - line:  { points: [[10, 286], [162, 286]], line_color: 0x27313F, line_width: 1 }
+        - label: { text: "< PAGE", x: 10, y: 294, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - label: { text: "RESET >", x: 108, y: 294, text_color: 0x5A6B78, text_font: montserrat_12 }
+
+    # ======================= PAGE 3: TEMPERATURE =======================
+    - id: tmp_page
+      widgets:
+        - label: { text: "KUBELAB", x: 10, y: 8, text_color: 0x75D8FD, text_font: montserrat_16 }
+        - label: { id: tmp_wifi, text: "----", x: 128, y: 10, text_color: 0x829AA8, text_font: montserrat_12 }
+        - label: { id: tmp_clock, text: "--:--", x: 10, y: 34, text_font: montserrat_22 }
+        - label: { text: "TEMP 3/3", x: 104, y: 44, text_color: 0x75D8FD, text_font: montserrat_12 }
+        - line:  { points: [[10, 66], [162, 66]], line_color: 0x27313F, line_width: 1 }
+        - label: { text: "PROXMOX - TEMP C", x: 10, y: 72, text_color: 0xF2A65A, text_font: montserrat_12 }
+
+        - label: { id: t1_dot, text: "\u2022", x: 10, y: 92,  text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: t1_label, text: "kubelab-1  --", x: 26, y: 92, text_font: montserrat_14 }
+        - bar:   { id: t1_bar, x: 10, y: 112, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - label: { id: t2_dot, text: "\u2022", x: 10, y: 128, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: t2_label, text: "kubelab-2  --", x: 26, y: 128, text_font: montserrat_14 }
+        - bar:   { id: t2_bar, x: 10, y: 148, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - label: { id: t3_dot, text: "\u2022", x: 10, y: 164, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: t3_label, text: "kubelab-3  --", x: 26, y: 164, text_font: montserrat_14 }
+        - bar:   { id: t3_bar, x: 10, y: 184, width: 152, height: 8, min_value: 0, max_value: 100, value: 0 }
+
+        - line:  { points: [[10, 206], [162, 206]], line_color: 0x27313F, line_width: 1 }
+        - label: { id: tmp_k8s_dot, text: "\u2022", x: 10, y: 218, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: tmp_k8s_label, text: "K8S --", x: 26, y: 218, text_font: montserrat_14 }
+
+        - label: { id: tmp_status, text: "Starting...", x: 10, y: 252, text_color: 0x829AA8, text_font: montserrat_12 }
 
         # --- button legend along the bottom edge (matches physical buttons) ---
         - line:  { points: [[10, 286], [162, 286]], line_color: 0x27313F, line_width: 1 }

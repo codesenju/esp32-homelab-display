@@ -63,6 +63,16 @@ PVE_FINGERPRINT = os.environ.get("PVE_FINGERPRINT", "").upper().replace(":", "")
 # Which Proxmox nodes map to which display rows.
 PVE_NODES = os.environ.get("PVE_NODES", "kubelab-1,kubelab-2,kubelab-3").split(",")
 
+# Node temperature (via SSH + lm-sensors). Optional: disable with ENABLE_TEMP=0.
+# TEMP_SSH_KEY  : path to the SSH private key.
+# TEMP_SSH_USER : SSH user (default root).
+# TEMP_NODE_HOSTS : comma list of "name=ip" mapping each PVE_NODES entry to an
+#                   SSH host, e.g. "kubelab-1=10.0.0.11,kubelab-2=..."
+ENABLE_TEMP = os.environ.get("ENABLE_TEMP", "0") == "1"
+TEMP_SSH_KEY = os.path.expanduser(os.environ.get("TEMP_SSH_KEY", ""))
+TEMP_SSH_USER = os.environ.get("TEMP_SSH_USER", "root")
+TEMP_NODE_HOSTS = os.environ.get("TEMP_NODE_HOSTS", "")
+
 KUBECONFIG = os.environ.get("KUBECONFIG", os.path.expanduser("~/.kube/config"))
 KUBECTL = os.environ.get("KUBECTL", "kubectl")
 ENABLE_K8S = os.environ.get("ENABLE_K8S", "1") == "1"
@@ -215,6 +225,62 @@ def collect_kubernetes():
 
 
 # --------------------------------------------------------------------------
+# Node temperature (SSH + lm-sensors)
+# --------------------------------------------------------------------------
+def _temp_host_map():
+    """Return {node_name: ssh_host} from TEMP_NODE_HOSTS 'name=ip,...'."""
+    m = {}
+    for pair in TEMP_NODE_HOSTS.split(","):
+        pair = pair.strip()
+        if "=" in pair:
+            name, host = pair.split("=", 1)
+            m[name.strip()] = host.strip()
+    return m
+
+
+def collect_temps():
+    """Return {node: celsius_or_None} using lm-sensors 'coretemp Package id 0'."""
+    out = {}
+    if not ENABLE_TEMP:
+        return out
+    if not TEMP_SSH_KEY:
+        log("Temperature enabled but TEMP_SSH_KEY not set — skipping temps")
+        return out
+
+    hosts = _temp_host_map()
+    # Remote one-liner: emit just the CPU package temp as a number.
+    remote = (
+        "sensors -j 2>/dev/null | python3 -c "
+        "'import json,sys;d=json.load(sys.stdin);"
+        "c=d.get(\"coretemp-isa-0000\",{});"
+        "p=c.get(\"Package id 0\",{});"
+        "v=[x for k,x in p.items() if k.endswith(\"_input\")];"
+        "print(v[0] if v else \"\")'"
+    )
+    for name in PVE_NODES:
+        name = name.strip()
+        host = hosts.get(name)
+        if not host:
+            out[name] = None
+            continue
+        try:
+            res = subprocess.run(
+                ["ssh", "-i", TEMP_SSH_KEY,
+                 "-o", "ConnectTimeout=8",
+                 "-o", "StrictHostKeyChecking=accept-new",
+                 "-o", "BatchMode=yes",
+                 f"{TEMP_SSH_USER}@{host}", remote],
+                capture_output=True, text=True, timeout=15,
+            )
+            val = res.stdout.strip()
+            out[name] = round(float(val), 1) if val else None
+        except Exception as e:
+            log(f"temp collect {name} failed: {e}")
+            out[name] = None
+    return out
+
+
+# --------------------------------------------------------------------------
 # Home Assistant publish
 # --------------------------------------------------------------------------
 def ha_set_state(entity_id, state, attributes=None):
@@ -235,8 +301,9 @@ def ha_set_state(entity_id, state, attributes=None):
         return False
 
 
-def publish(proxmox, k8s):
+def publish(proxmox, k8s, temps=None):
     now_iso = datetime.now(timezone.utc).isoformat()
+    temps = temps or {}
     node_slug = {"kubelab-1": "kubelab_1", "kubelab-2": "kubelab_2", "kubelab-3": "kubelab_3"}
     ok = 0
     total = 0
@@ -271,6 +338,18 @@ def publish(proxmox, k8s):
             {**base_attr, "friendly_name": f"{name} status", "uptime_seconds": data["uptime"]},
         )
 
+        # Temperature (CPU package °C) — only published when temps were collected
+        if name in temps:
+            total += 1
+            t = temps[name]
+            ok += ha_set_state(
+                f"sensor.{slug}_temperature",
+                t if t is not None else "unavailable",
+                {**base_attr, "source": "lm-sensors", "unit_of_measurement": "\u00b0C",
+                 "device_class": "temperature",
+                 "friendly_name": f"{name} temperature", "icon": "mdi:thermometer"},
+            )
+
     if k8s is not None:
         attr = {"source": "kubernetes", "last_updated_bridge": now_iso}
         for ent, val, extra in [
@@ -295,11 +374,12 @@ def main():
         sys.exit(1)
 
     log(f"IY HOMELAB bridge starting | HA={HA_URL} | nodes={PVE_NODES} | k8s={ENABLE_K8S} "
-        f"| interval={POLL_INTERVAL}s | oneshot={ONESHOT}")
+        f"| temp={ENABLE_TEMP} | interval={POLL_INTERVAL}s | oneshot={ONESHOT}")
     while True:
         proxmox = collect_proxmox()
         k8s = collect_kubernetes()
-        publish(proxmox, k8s)
+        temps = collect_temps()
+        publish(proxmox, k8s, temps)
         if ONESHOT:
             break
         time.sleep(POLL_INTERVAL)

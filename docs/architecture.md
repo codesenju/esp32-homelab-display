@@ -43,11 +43,14 @@ a source is later swapped.
   blind poll. The clock updates once a minute. A 5 s interval only refreshes the
   connectivity footer and runs the staleness watchdog.
 - **Pages & navigation:**
-  - Page 1 — `PROXMOX — CPU %` (3 node rows, each labelled `kubelab-N  NN%`).
-  - Page 2 — `PROXMOX — MEMORY %` (same 3 nodes, RAM %).
-  - The on-board **BOOT button (GPIO9)** cycles pages (`on_press → next_page`).
-    Both pages are kept continuously up to date, so switching is instant.
-  - A small `CPU 1/2` / `MEM 2/2` indicator shows which page is active.
+  - Page 1 — `PROXMOX - CPU %` (3 node rows, each labelled `kubelab-N  NN%`).
+  - Page 2 — `PROXMOX - MEMORY %` (same 3 nodes, RAM %).
+  - Page 3 — `PROXMOX - TEMP C` (same 3 nodes, CPU package temperature in °C;
+    bar scales 0–100 °C, colour: <70 green, 70–85 amber, ≥85 red).
+  - The on-board **BOOT button (GPIO9)** cycles pages
+    (`on_press → next_page`, CPU → MEMORY → TEMP → CPU). All pages are kept
+    continuously up to date, so switching is instant.
+  - A small `CPU 1/3` / `MEM 2/3` / `TEMP 3/3` indicator shows the active page.
 - **Shared rows:** both pages also show Kubernetes health (`K8S <state> R/T`)
   and the clock / Wi-Fi / HA-connection footer.
 
