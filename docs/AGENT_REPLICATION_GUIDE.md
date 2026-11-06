@@ -317,6 +317,68 @@ secret files.
 
 ---
 
+## Variant: ESP32-S3 + 3.5" ILI9488 (single-screen build)
+
+A second verified build drives a **3.5" ILI9488 (480×320)** from a **UNO-form
+ESP32-S3 (sparkleIoT XH-S3E / N16R8)** as **one always-on screen** (no pages,
+no button). Firmware: `iy-homelab-35.yaml`; hardware: `docs/hardware-35.md`;
+human guide: `docs/SETUP-35.md`. It reuses the **same HA entities** as the C6
+build. Deltas from the generic procedure above:
+
+- **Board enumerates as a UART bridge** (`/dev/cu.usbserial-*`, "USB Serial"),
+  NOT native USB-Serial/JTAG. Auto-reset (DTR/RTS) works, so no BOOT/RESET
+  dance — but **the default 921600 upload baud is unreliable; flash at 115200.**
+  Symptom of too-fast baud: `Changing baud rate to 921600... Changed.` then fail.
+- **esp32 block:** `board: esp32-s3-devkitc-1`, `variant: esp32s3`,
+  `flash_size: 16MB`, add `psram: {mode: octal, speed: 80MHz}` (N16R8 has 8 MB
+  PSRAM; needed for 16-bit colour + LVGL on a 480×320 panel).
+- **Display:** `platform: ili9xxx`, `model: ILI9488`, `invert_colors: true`
+  (this panel is inverted), `color_order: bgr`, `data_rate: 20MHz`.
+- **Dimensions — declare NATIVE, not rotated:** set
+  `dimensions: {width: 320, height: 480}` (the ILI9488's real portrait geometry)
+  and rotate to 480×320 landscape via `transform` below. **Do not** declare the
+  already-rotated `480×320` *and* `swap_xy` together — that makes LVGL map widget
+  **width** onto the short physical axis, so `bar`s render as tall vertical
+  strips instead of short horizontal bars (and rows look misaligned). Verified on
+  hardware: native `320×480` + `swap_xy: true` → bars render horizontally.
+- **Rotation with LVGL:** you may NOT set `rotation:` on an `ili9xxx` display
+  that feeds LVGL (ESPHome errors: "use of 'rotation' ... not compatible with
+  LVGL"). Use the display's `transform:` instead. Working landscape (270°) for
+  this panel: `transform: {swap_xy: true, mirror_x: false, mirror_y: true}`.
+  Also add `displays: [main_display]` under `lvgl:`.
+- **Pin map (all plain GPIOs, no strapping pins):**
+
+  | Function | GPIO |  | Function | GPIO |
+  |----------|------|--|----------|------|
+  | SPI SCK | 14 |  | TFT DC | 11 |
+  | SPI MOSI | 9 |  | TFT RST | 13 |
+  | TFT CS | 10 |  | TFT LED | 3V3 (always on) |
+
+  **ESP32-S3 strapping pins are GPIO0, GPIO3, GPIO45, GPIO46** — never route a
+  display control line through one. (Observed failure: DC on GPIO3 blocked
+  download mode → `No serial data received` on every upload until moved.)
+- **Backlight:** LED tied to 3V3 = always on; no `ledc`/`light` needed.
+- **No button / no touch:** single page, so no `binary_sensor` page nav. The
+  module's CTP touch and SD slot exist but are left unwired.
+- **Arduino caution (if NOT using ESPHome):** TFT_eSPI 2.5.43 crashes in
+  `tft.init()` on ESP32-S3 + Arduino core 3.x (`StoreProhibited`,
+  `EXCVADDR 0x00000010`). Use **ESPHome (preferred here)** or **LovyanGFX** with
+  an explicit `Panel_ILI9488` config.
+- **Flash + adopt (verified values from this build):**
+  ```bash
+  esphome compile iy-homelab-35.yaml
+  esptool --chip esp32s3 --port /dev/cu.usbserial-10 --baud 115200 \
+    --before default-reset --after hard-reset write-flash -z 0x0 \
+    .esphome/build/iy-homelab-35/build/firmware.factory.bin
+  # device came up at 192.168.0.232, mDNS iy-homelab-35.local, API :6053
+  esphome upload iy-homelab-35.yaml --device 192.168.0.232   # OTA thereafter
+  ```
+
+**Gate:** text reads correctly in landscape (ask the user / photo), footer shows
+"HA connected", and node/K8s values are live. "Compiled"/"flashed" ≠ "displaying".
+
+---
+
 ## Pitfalls observed in the reference build (save yourself the loops)
 
 - **Flash size lie:** starter YAML said 4 MB; the chip was 8 MB. Trust esptool.

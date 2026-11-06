@@ -16,16 +16,16 @@ connectivity, and the current Johannesburg time. Three button-switchable pages:
 ```
   Page 1: CPU            Page 2: MEMORY         Page 3: TEMP
 ┌─────────────────────┐┌─────────────────────┐┌─────────────────────┐
-│ KUBELAB    15:13 WiFi││ KUBELAB    15:13 WiFi││ KUBELAB    15:13 WiFi│
-│             CPU  1/3 ││             MEM  2/3 ││            TEMP  3/3 │
+│ KUBELAB   15:13 WiFi│| KUBELAB   15:13 WiFi││ KUBELAB   15:13 WiFi│
+│            CPU  1/3 ││            MEM  2/3 ││           TEMP  3/3 │
 ├─────────────────────┤├─────────────────────┤├─────────────────────┤
 │ PROXMOX - CPU %     ││ PROXMOX - MEMORY %  ││ PROXMOX - TEMP C    │
 │ ● kubelab-1   24%   ││ ● kubelab-1   80%   ││ ● kubelab-1   83C   │
-│ ███████░░░░░░░░░░   ││ █████████████░░░   ││ █████████████░░░   │
+│ ███████░░░░░░░░░░   ││ █████████████░░░    ││ █████████████░░░    │
 │ ● kubelab-2   38%   ││ ● kubelab-2   81%   ││ ● kubelab-2   73C   │
-│ ██████████░░░░░░    ││ █████████████░░░   ││ ███████████░░░░░   │
+│ ██████████░░░░░░    ││ █████████████░░░    ││ ███████████░░░░░    │
 │ ● kubelab-3   16%   ││ ● kubelab-3   80%   ││ ● kubelab-3   70C   │
-│ ████░░░░░░░░░░░░░   ││ █████████████░░░   ││ ███████████░░░░░   │
+│ ████░░░░░░░░░░░░░   ││ █████████████░░░    ││ ███████████░░░░░    │
 ├─────────────────────┤├─────────────────────┤├─────────────────────┤
 │ ● K8S Degraded 6/6  ││ ● K8S Degraded 6/6  ││ ● K8S Degraded 6/6  │
 ├─────────────────────┤├─────────────────────┤├─────────────────────┤
@@ -62,6 +62,18 @@ All pages also show Kubernetes cluster health, the clock, and Wi-Fi / HA
 connectivity. The **right button is RESET** (`RESET >`, hardware reboot only).
 A node's status dot reflects health (green/amber/red) and goes grey when data
 is unknown or stale. Missing numeric values render as `--`.
+
+## Display variants
+
+This repo now supports **two** physical builds that render the same data:
+
+| Variant | Board | Display | Firmware | Layout | Docs |
+|---------|-------|---------|----------|--------|------|
+| 1.47" (original) | Waveshare ESP32-C6-LCD-1.47-M | ST7789 172×320 | `iy-homelab.yaml` | 3 button-switched pages | [`docs/hardware.md`](docs/hardware.md) |
+| 3.5" (new) | ESP32-S3 sparkleIoT XH-S3E (N16R8) | ILI9488 480×320 | `iy-homelab-35.yaml` | single always-on screen | [`docs/hardware-35.md`](docs/hardware-35.md), [`docs/SETUP-35.md`](docs/SETUP-35.md) |
+
+Both subscribe to the **same** Home Assistant entities from the same
+`proxmox_bridge.py`; you can run either or both at once.
 
 ## Hardware (verified)
 
@@ -120,13 +132,17 @@ scripts/flash.sh /dev/cu.usbmodem1101      # USB
 esp32-homelab-display/
 ├── README.md
 ├── .gitignore
-├── iy-homelab.yaml              # ESPHome firmware (LVGL dashboard)
+├── iy-homelab.yaml              # ESPHome firmware — 1.47" C6 (LVGL, 3 pages)
+├── iy-homelab-35.yaml           # ESPHome firmware — 3.5" S3 ILI9488 (single screen)
 ├── secrets.example.yaml         # template; real secrets.yaml is gitignored
 ├── docs/
 │   ├── OVERVIEW.md                 # plain-language "what is this" (start here)
-│   ├── AGENT_REPLICATION_GUIDE.md  # how an agent rebuilds this on another homelab
+│   ├── AGENT_REPLICATION_GUIDE.md  # how an agent rebuilds this (both variants)
 │   ├── architecture.md
-│   ├── hardware.md
+│   ├── hardware.md                 # 1.47" ESP32-C6 board
+│   ├── hardware-35.md              # 3.5" ESP32-S3 + ILI9488 board + wiring map
+│   ├── SETUP-35.md                 # human setup guide for the 3.5" build
+│   ├── TOUCH-ROADMAP.md            # future: capacitive-touch wiring + feature plan
 │   ├── home-assistant-entities.md
 │   └── troubleshooting.md
 ├── scripts/

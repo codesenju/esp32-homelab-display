@@ -1,0 +1,365 @@
+## IY HOMELAB — 3.5" ILI9488 single-screen monitoring display
+## Board: ESP32-S3 (sparkleIoT XH-S3E, N16R8 = 16MB flash / 8MB PSRAM), UART-bridge.
+## External 3.5" ILI9488 SPI TFT (Hongxun S219C35002A / "35002 V1.2"), 480x320 landscape.
+##
+## ONE always-on screen (no pages, no buttons): all three Proxmox nodes with
+## CPU / MEMORY / TEMP side-by-side, Kubernetes health, clock, and HA/WiFi
+## connectivity. Reuses the SAME Home Assistant entities published by
+## integrations/proxmox_bridge.py as iy-homelab.yaml.
+##
+## Display wiring to the ESP32-S3:
+##   TFT SCK  -> IO14    TFT MOSI -> IO9    TFT DC -> IO11
+##   TFT RST  -> IO13    TFT CS   -> IO10   TFT LED -> 3V3 (always on)
+##   TFT VCC  -> 5V      TFT GND  -> GND    (MISO unused)
+
+substitutions:
+  name: iy-homelab-35
+  friendly_name: IY Homelab Display 35
+  stale_after: "90"
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# 8MB PSRAM — needed for 16-bit color + LVGL buffers on a 480x320 panel.
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s   # stay up even if HA is briefly unreachable (always-on)
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "IY-HOMELAB-35 Fallback"
+    password: !secret ota_password
+
+captive_portal:
+
+time:
+  - platform: sntp
+    id: local_clock
+    timezone: Africa/Johannesburg
+    on_time:
+      - seconds: 0
+        then:
+          - lambda: |-
+              auto t = id(local_clock).now();
+              std::string s = t.is_valid() ? t.strftime("%H:%M") : std::string("--:--");
+              lv_label_set_text(id(hdr_clock), s.c_str());
+
+globals:
+  - id: last_node_update
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: last_k8s_update
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+
+spi:
+  clk_pin: GPIO14
+  mosi_pin: GPIO9
+
+display:
+  - platform: ili9xxx
+    id: main_display
+    model: ILI9488
+    dimensions:
+      # NATIVE portrait geometry of the ILI9488 (320 wide x 480 tall).
+      # Landscape is produced by the LVGL `transform` below (swap_xy), NOT by
+      # pre-rotating these dimensions. Declaring the already-rotated 480x320
+      # here *and* swapping axes made LVGL map widget width onto the short
+      # physical axis, so `bar`s rendered as tall vertical strips. Declaring
+      # native 320x480 + swap_xy gives LVGL a consistent 480x320 landscape
+      # canvas, so a 95x7 bar renders as a short horizontal bar.
+      width: 320
+      height: 480
+    cs_pin: GPIO10
+    dc_pin: GPIO11
+    reset_pin: GPIO13
+    data_rate: 20MHz
+    color_order: bgr
+    invert_colors: true      # matched on bench: ILI9488 panel needs inversion
+    transform:               # 270deg landscape, corrected (was mirrored L-R)
+      swap_xy: true
+      mirror_x: false
+      mirror_y: true
+    auto_clear_enabled: false
+    update_interval: never
+
+## ---------------------------------------------------------------------------
+## Home Assistant entity subscriptions (same entities as iy-homelab.yaml)
+## ---------------------------------------------------------------------------
+sensor:
+  - platform: homeassistant
+    id: node1_cpu
+    entity_id: sensor.kubelab_1_cpu_usage
+    on_value: { then: [ lambda: 'id(last_node_update)=(uint32_t)(millis()/1000);', script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node2_cpu
+    entity_id: sensor.kubelab_2_cpu_usage
+    on_value: { then: [ lambda: 'id(last_node_update)=(uint32_t)(millis()/1000);', script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node3_cpu
+    entity_id: sensor.kubelab_3_cpu_usage
+    on_value: { then: [ lambda: 'id(last_node_update)=(uint32_t)(millis()/1000);', script.execute: refresh_nodes ] }
+
+  - platform: homeassistant
+    id: node1_mem
+    entity_id: sensor.kubelab_1_memory_usage
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node2_mem
+    entity_id: sensor.kubelab_2_memory_usage
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node3_mem
+    entity_id: sensor.kubelab_3_memory_usage
+    on_value: { then: [ script.execute: refresh_nodes ] }
+
+  - platform: homeassistant
+    id: node1_temp
+    entity_id: sensor.kubelab_1_temperature
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node2_temp
+    entity_id: sensor.kubelab_2_temperature
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node3_temp
+    entity_id: sensor.kubelab_3_temperature
+    on_value: { then: [ script.execute: refresh_nodes ] }
+
+  - platform: homeassistant
+    id: k8s_ready
+    entity_id: sensor.homelab_kubernetes_nodes_ready
+    on_value: { then: [ lambda: 'id(last_k8s_update)=(uint32_t)(millis()/1000);', script.execute: refresh_k8s ] }
+  - platform: homeassistant
+    id: k8s_total
+    entity_id: sensor.homelab_kubernetes_nodes_total
+  - platform: homeassistant
+    id: k8s_pods_bad
+    entity_id: sensor.homelab_kubernetes_pods_not_ready
+    on_value: { then: [ script.execute: refresh_k8s ] }
+
+text_sensor:
+  - platform: homeassistant
+    id: node1_status
+    entity_id: sensor.kubelab_1_status
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node2_status
+    entity_id: sensor.kubelab_2_status
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node3_status
+    entity_id: sensor.kubelab_3_status
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: k8s_health
+    entity_id: sensor.homelab_kubernetes_health
+    on_value: { then: [ script.execute: refresh_k8s ] }
+
+## ---------------------------------------------------------------------------
+## Render scripts
+## ---------------------------------------------------------------------------
+script:
+  - id: refresh_nodes
+    then:
+      - lambda: |-
+          const char* names[3] = {"kubelab-1", "kubelab-2", "kubelab-3"};
+          float cpu[3] = {id(node1_cpu).state, id(node2_cpu).state, id(node3_cpu).state};
+          float mem[3] = {id(node1_mem).state, id(node2_mem).state, id(node3_mem).state};
+          float tmp[3] = {id(node1_temp).state, id(node2_temp).state, id(node3_temp).state};
+          std::string st[3] = {id(node1_status).state, id(node2_status).state, id(node3_status).state};
+          lv_obj_t* name_lbl[3] = {id(n1_name), id(n2_name), id(n3_name)};
+          lv_obj_t* dot[3]      = {id(n1_dot),  id(n2_dot),  id(n3_dot)};
+          lv_obj_t* cpu_lbl[3]  = {id(n1_cpu),  id(n2_cpu),  id(n3_cpu)};
+          lv_obj_t* cpu_bar[3]  = {id(n1_cpub), id(n2_cpub), id(n3_cpub)};
+          lv_obj_t* mem_lbl[3]  = {id(n1_mem),  id(n2_mem),  id(n3_mem)};
+          lv_obj_t* mem_bar[3]  = {id(n1_memb), id(n2_memb), id(n3_memb)};
+          lv_obj_t* tmp_lbl[3]  = {id(n1_tmp),  id(n2_tmp),  id(n3_tmp)};
+          lv_obj_t* tmp_bar[3]  = {id(n1_tmpb), id(n2_tmpb), id(n3_tmpb)};
+
+          for (int i = 0; i < 3; i++) {
+            bool online = (st[i] == "online");
+            bool down   = (st[i] == "offline");
+            bool kc = online && !std::isnan(cpu[i]);
+            bool km = online && !std::isnan(mem[i]);
+            bool kt = online && !std::isnan(tmp[i]);
+
+            lv_label_set_text(name_lbl[i], names[i]);
+
+            // health dot: worst of cpu/mem, or down/unknown
+            uint32_t dcol;
+            if (down)            dcol = 0xE8564B;
+            else if (!kc && !km) dcol = 0x829AA8;
+            else {
+              float worst = 0;
+              if (kc) worst = cpu[i];
+              if (km && mem[i] > worst) worst = mem[i];
+              dcol = worst >= 85 ? 0xE8564B : (worst >= 60 ? 0xF4C14E : 0x66D9A0);
+            }
+            lv_obj_set_style_text_color(dot[i], lv_color_hex(dcol), 0);
+
+            char b[24];
+            // CPU
+            if (kc) snprintf(b, sizeof(b), "%.0f%%", cpu[i]); else snprintf(b, sizeof(b), down?"DOWN":"--");
+            lv_label_set_text(cpu_lbl[i], b);
+            uint32_t cc = !kc ? dcol : (cpu[i]>=85?0xE8564B:(cpu[i]>=60?0xF4C14E:0x66D9A0));
+            lv_bar_set_value(cpu_bar[i], kc?(int)cpu[i]:0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(cpu_bar[i], lv_color_hex(cc), (int)LV_PART_INDICATOR);
+            // MEM
+            if (km) snprintf(b, sizeof(b), "%.0f%%", mem[i]); else snprintf(b, sizeof(b), down?"DOWN":"--");
+            lv_label_set_text(mem_lbl[i], b);
+            uint32_t mc = !km ? dcol : (mem[i]>=85?0xE8564B:(mem[i]>=60?0xF4C14E:0x66D9A0));
+            lv_bar_set_value(mem_bar[i], km?(int)mem[i]:0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(mem_bar[i], lv_color_hex(mc), (int)LV_PART_INDICATOR);
+            // TEMP (0-100C scale; <70 green, 70-85 amber, >=85 red)
+            if (kt) snprintf(b, sizeof(b), "%.0fC", tmp[i]); else snprintf(b, sizeof(b), down?"DOWN":"--");
+            lv_label_set_text(tmp_lbl[i], b);
+            uint32_t tc = !kt ? dcol : (tmp[i]>=85?0xE8564B:(tmp[i]>=70?0xF4C14E:0x66D9A0));
+            lv_bar_set_value(tmp_bar[i], kt?(int)tmp[i]:0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(tmp_bar[i], lv_color_hex(tc), (int)LV_PART_INDICATOR);
+          }
+
+  - id: refresh_k8s
+    then:
+      - lambda: |-
+          std::string h = id(k8s_health).state;
+          uint32_t col = 0x829AA8;
+          std::string txt = "K8S  --";
+          if (!h.empty() && h != "unknown" && h != "unavailable") {
+            if (h == "Healthy")       col = 0x66D9A0;
+            else if (h == "Degraded") col = 0xF4C14E;
+            else if (h == "Critical") col = 0xE8564B;
+            char b[64];
+            float rd = id(k8s_ready).state, tot = id(k8s_total).state, bad = id(k8s_pods_bad).state;
+            if (!std::isnan(rd) && !std::isnan(tot))
+              snprintf(b, sizeof(b), "K8S  %s   Ready %.0f/%.0f   Pods bad %.0f",
+                       h.c_str(), rd, tot, std::isnan(bad)?0:bad);
+            else
+              snprintf(b, sizeof(b), "K8S  %s", h.c_str());
+            txt = b;
+          }
+          lv_label_set_text(id(k8s_label), txt.c_str());
+          lv_obj_set_style_text_color(id(k8s_dot), lv_color_hex(col), 0);
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          bool ha = api::global_api_server != nullptr && api::global_api_server->is_connected();
+          bool wifi = wifi::global_wifi_component != nullptr && wifi::global_wifi_component->is_connected();
+          uint32_t now = (uint32_t)(millis()/1000);
+          char f[64];
+          if (ha) {
+            uint32_t age = id(last_node_update)>0 ? now-id(last_node_update) : 0;
+            snprintf(f, sizeof(f), "HA connected  -  updated %us ago", age);
+          } else snprintf(f, sizeof(f), wifi?"WiFi only - waiting for HA":"Offline");
+          lv_label_set_text(id(foot_label), f);
+          uint32_t fcol = ha ? 0x66D9A0 : (wifi ? 0xF4C14E : 0xE8564B);
+          lv_obj_set_style_text_color(id(foot_label), lv_color_hex(fcol), 0);
+          lv_label_set_text(id(hdr_conn), ha?"HA":"WiFi");
+          lv_obj_set_style_text_color(id(hdr_conn), lv_color_hex(fcol), 0);
+
+          // staleness -> grey dots
+          if (!ha || (id(last_node_update)>0 && now-id(last_node_update) > ${stale_after})) {
+            lv_obj_t* dots[3] = {id(n1_dot), id(n2_dot), id(n3_dot)};
+            for (int i=0;i<3;i++) lv_obj_set_style_text_color(dots[i], lv_color_hex(0x829AA8), 0);
+          }
+          if (!ha || (id(last_k8s_update)>0 && now-id(last_k8s_update) > ${stale_after}))
+            lv_obj_set_style_text_color(id(k8s_dot), lv_color_hex(0x829AA8), 0);
+
+font:
+  - id: dot_font
+    # size matched to the row text (montserrat_16) so the dot box and the
+    # label box are the same height and share the same top `y` -> the dot
+    # sits on the same line as "kubelab-N" / CPU / MEM / TEMP (no float).
+    file: "gfonts://Montserrat@700"
+    size: 16
+    glyphs: ["\U00002022"]
+
+## ---------------------------------------------------------------------------
+## LVGL — ONE page, 480x320 landscape. Columns: NODE | CPU | MEM | TEMP.
+## ---------------------------------------------------------------------------
+lvgl:
+  buffer_size: 25%
+  color_depth: 16
+  displays:
+    - main_display
+  bg_color: 0x0E1420
+  text_color: 0xE8F2FA
+  pages:
+    - id: main_page
+      widgets:
+        # ---- header ----
+        - label: { text: "KUBELAB", x: 12, y: 8, text_color: 0x75D8FD, text_font: montserrat_22 }
+        - label: { id: hdr_clock, text: "--:--", x: 330, y: 8, text_font: montserrat_22 }
+        - label: { id: hdr_conn, text: "WiFi", x: 420, y: 14, text_color: 0x829AA8, text_font: montserrat_16 }
+        - line:  { points: [[12, 44], [468, 44]], line_color: 0x27313F, line_width: 2 }
+
+        # ---- column headers ----
+        - label: { text: "NODE", x: 14,  y: 52, text_color: 0x829AA8, text_font: montserrat_16 }
+        - label: { text: "CPU",  x: 150, y: 52, text_color: 0x66D9A0, text_font: montserrat_16 }
+        - label: { text: "MEM",  x: 265, y: 52, text_color: 0xB58BF0, text_font: montserrat_16 }
+        - label: { text: "TEMP", x: 385, y: 52, text_color: 0xF2A65A, text_font: montserrat_16 }
+
+        # ===== node row 1 (y base 84) =====
+        - label: { id: n1_dot,  text: "\u2022", x: 12, y: 98, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: n1_name, text: "kubelab-1", x: 30, y: 98, text_font: montserrat_16 }
+        - label: { id: n1_cpu,  text: "--", x: 150, y: 84, text_font: montserrat_16 }
+        - bar:   { id: n1_cpub, x: 150, y: 106, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: n1_mem,  text: "--", x: 265, y: 84, text_font: montserrat_16 }
+        - bar:   { id: n1_memb, x: 265, y: 106, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: n1_tmp,  text: "--", x: 385, y: 84, text_font: montserrat_16 }
+        - bar:   { id: n1_tmpb, x: 385, y: 106, width: 80, height: 7, min_value: 0, max_value: 100, value: 0 }
+
+        # ===== node row 2 (y base 128) =====
+        - label: { id: n2_dot,  text: "\u2022", x: 12, y: 142, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: n2_name, text: "kubelab-2", x: 30, y: 142, text_font: montserrat_16 }
+        - label: { id: n2_cpu,  text: "--", x: 150, y: 128, text_font: montserrat_16 }
+        - bar:   { id: n2_cpub, x: 150, y: 150, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: n2_mem,  text: "--", x: 265, y: 128, text_font: montserrat_16 }
+        - bar:   { id: n2_memb, x: 265, y: 150, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: n2_tmp,  text: "--", x: 385, y: 128, text_font: montserrat_16 }
+        - bar:   { id: n2_tmpb, x: 385, y: 150, width: 80, height: 7, min_value: 0, max_value: 100, value: 0 }
+
+        # ===== node row 3 (y base 172) =====
+        - label: { id: n3_dot,  text: "\u2022", x: 12, y: 186, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: n3_name, text: "kubelab-3", x: 30, y: 186, text_font: montserrat_16 }
+        - label: { id: n3_cpu,  text: "--", x: 150, y: 172, text_font: montserrat_16 }
+        - bar:   { id: n3_cpub, x: 150, y: 194, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: n3_mem,  text: "--", x: 265, y: 172, text_font: montserrat_16 }
+        - bar:   { id: n3_memb, x: 265, y: 194, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
+        - label: { id: n3_tmp,  text: "--", x: 385, y: 172, text_font: montserrat_16 }
+        - bar:   { id: n3_tmpb, x: 385, y: 194, width: 80, height: 7, min_value: 0, max_value: 100, value: 0 }
+
+        # ---- kubernetes row ----
+        - line:  { points: [[12, 224], [468, 224]], line_color: 0x27313F, line_width: 1 }
+        - label: { id: k8s_dot, text: "\u2022", x: 12, y: 234, text_color: 0x829AA8, text_font: dot_font }
+        - label: { id: k8s_label, text: "K8S  --", x: 30, y: 234, text_font: montserrat_16 }
+
+        # ---- footer ----
+        - line:  { points: [[12, 268], [468, 268]], line_color: 0x27313F, line_width: 1 }
+        - label: { id: foot_label, text: "Starting...", x: 12, y: 278, text_color: 0x829AA8, text_font: montserrat_16 }
