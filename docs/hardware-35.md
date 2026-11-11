@@ -24,6 +24,7 @@ button) using the larger area. Firmware: [`iy-homelab-35.yaml`](../iy-homelab-35
 - [Future development — capacitive touch (CTP)](#future-development--capacitive-touch-ctp)
   - [Proposed touch wiring (FT6236 over I²C)](#proposed-touch-wiring-ft6236-over-i2c)
     - [CTP connector layout (physical pin order)](#ctp-connector-layout-physical-pin-order-on-the-module)
+    - [As-built wiring (this unit) — T_* header](#as-built-wiring-this-unit--t_-header)
   - [Updated layout diagram (display + touch)](#updated-layout-diagram-display--touch)
   - [ESPHome config sketch](#esphome-config-sketch-for-when-touch-is-wired)
 
@@ -216,6 +217,13 @@ adding it later; nothing here is connected yet.
 
 ## Proposed touch wiring (FT6236 over I²C)
 
+> **AS-BUILT on this unit — see [the as-built section below](#as-built-wiring-this-unit--t_-header).**
+> The table below is the original *FPC-connector* proposal and is kept for
+> reference; the signal→GPIO assignment that the firmware actually uses was
+> changed to match how this board was physically soldered (via the T_* header,
+> not the FPC). If you wire a fresh board from scratch, either mapping works as
+> long as the firmware's `i2c`/`touchscreen` pins agree with your wiring.
+
 Four extra wires (plus the shared GND/3V3 the display already provides). Chosen
 GPIOs avoid the SPI pins (9/10/11/13/14), the strapping pins (0/3/45/46), and
 the reserved set (IO35–42, 45, 16, 15, 47, 48).
@@ -267,6 +275,36 @@ confuse them:
 > diagram — read the `1…6` labels, then map `SDA→IO4, SCL→IO5, INT→IO6,
 > RST→IO7, VDD→3V3, GND→GND`.
 
+### As-built wiring (this unit) — T_* header
+
+This physical build does **not** use the fragile 6-pin FPC pigtail. Instead the
+CTP signals are taken from the board's 0.1" **RTP / `T_*` header** pins, which
+the board internally routes to the FT6236 (confirmed by the silkscreened
+**CTP Interface** table: `T_CLK→SCL, T_CS→RST, T_SDI→SDA, T_IRQ→INT,
+T_SDO→NC`). Soldering to the 0.1" header is far more robust than the FPC.
+
+The GPIO assignment was chosen to match the solder order used on the bench, so
+it differs from the FPC proposal above. **This is the mapping the firmware
+([`iy-homelab-35.yaml`](../iy-homelab-35.yaml)) expects:**
+
+| Header pin (silkscreen) | CTP signal | → ESP32-S3 pin | ESPHome key |
+|-------------------------|------------|----------------|-------------|
+| **T_CLK** | SCL (I²C clock) | **IO4** | `i2c: scl` |
+| **T_CS** | RST (touch reset) | **IO5** | `touchscreen: reset_pin` |
+| **T_SDI** | SDA (I²C data) | **IO6** | `i2c: sda` |
+| **T_IRQ** | INT (interrupt) | **IO7** | `touchscreen: interrupt_pin` |
+| **T_SDO** | NC (unused) | *(not connected)* | — |
+| VCC (main header) | power 3.3 V | **3V3** (shared w/ display) | — |
+| GND (main header) | ground | **GND** (shared w/ display) | — |
+
+By signal, for cross-checking firmware: **SDA→IO6, SCL→IO4, INT→IO7, RST→IO5.**
+
+> All four GPIOs (IO4–IO7) are plain, broken-out pins — none are strapping
+> (0/3/45/46), USB (19/20), or in the reserved set — so this ordering is
+> electrically fine. The pin *order* is arbitrary as long as firmware agrees;
+> the only hard rule is SDA/SCL go to the `i2c:` keys and INT/RST to the
+> `touchscreen:` keys.
+
 ### Updated layout diagram (display + touch)
 
 ```
@@ -291,16 +329,17 @@ confuse them:
 ### ESPHome config sketch (for when touch is wired)
 
 ```yaml
+# As-built pins for this unit: SDA->IO6, SCL->IO4, INT->IO7, RST->IO5
 i2c:
-  sda: GPIO4
-  scl: GPIO5
+  sda: GPIO6
+  scl: GPIO4
   scan: true           # on first boot, confirm FT6236 answers at 0x38
 
 touchscreen:
   - platform: ft63x6   # FT6236/FT6336 family
     id: my_touch
-    interrupt_pin: GPIO6
-    reset_pin: GPIO7
+    interrupt_pin: GPIO7
+    reset_pin: GPIO5
     # calibration: swap/mirror to match the display transform if taps are offset
     transform:
       swap_xy: true

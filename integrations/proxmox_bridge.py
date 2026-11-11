@@ -83,6 +83,14 @@ UPS_SOURCE = os.environ.get("UPS_SOURCE", "")  # reserved for future NUT/SNMP wi
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL", "15"))
 ONESHOT = os.environ.get("ONESHOT", "0") == "1"
 
+# Optional embedded HTTP server for health/status. Enabled when HTTP_PORT is set
+# (e.g. in Kubernetes so the Service/HTTPRoute at ha-bridge.<domain> has a
+# backend). Serves:
+#   GET /healthz -> 200 "ok" once the first publish cycle has completed,
+#                   503 before that. Used as readiness/liveness probe.
+#   GET /        -> JSON snapshot of the last publish (counts + timestamp).
+HTTP_PORT = int(os.environ.get("HTTP_PORT", "0"))
+
 
 def log(msg):
     ts = datetime.now(timezone.utc).strftime("%H:%M:%S")
@@ -166,6 +174,47 @@ def collect_proxmox():
         else:
             cpu = mem = uptime = None
         out[name] = {"status": status, "cpu": cpu, "mem": mem, "uptime": uptime}
+    return out
+
+
+def collect_vms():
+    """Return {node: [ {name, cpu, mem}, ... ]} of RUNNING qemu VMs per node.
+
+    Uses the per-VM status/current endpoint for accurate CPU (the list
+    endpoint's cpu field reads ~0). Stopped VMs are excluded. Sorted by CPU
+    desc so the busiest VMs show first on the display.
+    """
+    out = {}
+    if not (PVE_TOKEN_ID and PVE_TOKEN_SECRET):
+        return out
+    if PVE_FINGERPRINT and not _verify_pve_fingerprint():
+        return out
+    for name in PVE_NODES:
+        name = name.strip()
+        vms = []
+        try:
+            listing = pve_get(f"/nodes/{name}/qemu")
+        except Exception as e:
+            log(f"VM list {name} failed: {e}")
+            out[name] = []
+            continue
+        for v in listing:
+            if v.get("status") != "running":
+                continue
+            vmid = v.get("vmid")
+            vmname = v.get("name", str(vmid))
+            cpu = mem = None
+            try:
+                cur = pve_get(f"/nodes/{name}/qemu/{vmid}/status/current")
+                cpu = round(float(cur.get("cpu", 0.0)) * 100.0, 1)
+                maxmem = float(cur.get("maxmem", 0)) or 1.0
+                mem = round(float(cur.get("mem", 0)) / maxmem * 100.0, 1)
+            except Exception as e:
+                log(f"VM status {name}/{vmid} failed: {e}")
+            vms.append({"name": vmname, "cpu": cpu, "mem": mem})
+        # busiest first (None sorts last)
+        vms.sort(key=lambda x: (x["cpu"] if x["cpu"] is not None else -1), reverse=True)
+        out[name] = vms
     return out
 
 
@@ -301,7 +350,7 @@ def ha_set_state(entity_id, state, attributes=None):
         return False
 
 
-def publish(proxmox, k8s, temps=None):
+def publish(proxmox, k8s, temps=None, vms=None):
     now_iso = datetime.now(timezone.utc).isoformat()
     temps = temps or {}
     node_slug = {"kubelab-1": "kubelab_1", "kubelab-2": "kubelab_2", "kubelab-3": "kubelab_3"}
@@ -364,8 +413,81 @@ def publish(proxmox, k8s, temps=None):
             ok += ha_set_state(ent, val, {**attr, **extra,
                                           "friendly_name": ent.split(".")[1].replace("_", " ").title()})
 
+    # Per-node running-VM list. One text sensor per node:
+    #   state           = running VM count
+    #   attributes.vms  = [{"name","cpu","mem"}, ...]  (busiest first, machine-readable)
+    #   attributes.lines= preformatted text block the ESP renders directly in a
+    #                     label (avoids on-device JSON parsing). One line per VM:
+    #                     "<name padded>  <cpu>%  <mem>%".
+    for name, vmlist in (vms or {}).items():
+        slug = node_slug.get(name, name.replace("-", "_"))
+        total += 1
+        lines = []
+        for v in vmlist:
+            cpu = "--" if v["cpu"] is None else f"{v['cpu']:.0f}%"
+            mem = "--" if v["mem"] is None else f"{v['mem']:.0f}%"
+            # name left-justified to 20, then CPU and MEM columns
+            lines.append(f"{v['name'][:20]:<20} {cpu:>5} {mem:>5}")
+        lines_txt = "\n".join(lines) if lines else "(no running VMs)"
+        ok += ha_set_state(
+            f"sensor.{slug}_vms",
+            len(vmlist),
+            {"source": "proxmox", "node": name, "last_updated_bridge": now_iso,
+             "unit_of_measurement": "VMs", "friendly_name": f"{name} VMs",
+             "icon": "mdi:server", "vms": vmlist, "lines": lines_txt},
+        )
+
     log(f"Published {ok}/{total} entities to Home Assistant")
     return ok, total
+
+
+# --------------------------------------------------------------------------
+# Optional HTTP health/status server (for Kubernetes probes + ingress backend)
+# --------------------------------------------------------------------------
+STATUS = {
+    "healthy": False,
+    "cycles": 0,
+    "published_ok": 0,
+    "published_total": 0,
+    "last_publish_utc": None,
+}
+
+
+def maybe_start_http_server():
+    """Start a tiny background HTTP server if HTTP_PORT is set."""
+    if HTTP_PORT <= 0:
+        return
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def _send(self, code, body, ctype="application/json"):
+            payload = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def do_GET(self):
+            if self.path.rstrip("/") in ("/healthz", "/health"):
+                if STATUS["healthy"]:
+                    self._send(200, "ok\n", "text/plain")
+                else:
+                    self._send(503, "starting\n", "text/plain")
+                return
+            # Root: status snapshot
+            self._send(200, json.dumps({"service": "kubelab-ha-bridge", **STATUS}) + "\n")
+
+        def log_message(self, *args):
+            pass  # silence per-request logging; the bridge logs its own cycles
+
+    def serve():
+        httpd = http.server.ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
+        log(f"HTTP status server listening on :{HTTP_PORT} (/healthz, /)")
+        httpd.serve_forever()
+
+    threading.Thread(target=serve, daemon=True).start()
 
 
 def main():
@@ -373,13 +495,24 @@ def main():
         log("FATAL: HA_TOKEN not set. Source integrations/bridge.env first.")
         sys.exit(1)
 
+    maybe_start_http_server()
+
     log(f"KUBELAB bridge starting | HA={HA_URL} | nodes={PVE_NODES} | k8s={ENABLE_K8S} "
-        f"| temp={ENABLE_TEMP} | interval={POLL_INTERVAL}s | oneshot={ONESHOT}")
+        f"| temp={ENABLE_TEMP} | interval={POLL_INTERVAL}s | oneshot={ONESHOT}"
+        f"{' | http=' + str(HTTP_PORT) if HTTP_PORT else ''}")
     while True:
         proxmox = collect_proxmox()
         k8s = collect_kubernetes()
         temps = collect_temps()
-        publish(proxmox, k8s, temps)
+        vms = collect_vms()
+        ok, total = publish(proxmox, k8s, temps, vms)
+        STATUS.update({
+            "last_publish_utc": datetime.now(timezone.utc).isoformat(),
+            "published_ok": ok,
+            "published_total": total,
+            "healthy": ok > 0,
+            "cycles": STATUS.get("cycles", 0) + 1,
+        })
         if ONESHOT:
             break
         time.sleep(POLL_INTERVAL)

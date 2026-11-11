@@ -75,10 +75,50 @@ globals:
     type: uint32_t
     restore_value: no
     initial_value: "0"
+  # Which node (0..2) the detail page is currently showing.
+  - id: sel_node
+    type: int
+    restore_value: no
+    initial_value: "0"
 
 spi:
   clk_pin: GPIO14
   mosi_pin: GPIO9
+
+## ---------------------------------------------------------------------------
+## Capacitive touch (FT6236 CTP over I2C) — BRING-UP MODE.
+## Wiring on THIS board via the RTP/T_* 0.1" header (see docs/hardware-35.md):
+##   T_CLK(SCL) -> IO4   T_CS(RST) -> IO5   T_SDI(SDA) -> IO6   T_IRQ(INT) -> IO7
+##   VCC -> 3V3   GND -> GND
+## i.e. by signal:  SDA -> IO6 | SCL -> IO4 | INT -> IO7 | RST -> IO5
+## `scan: true` logs any I2C device at boot — the FT6236 must answer at 0x38.
+## The touchscreen `on_touch` just logs coordinates so we can confirm the
+## controller works and calibrate the transform BEFORE wiring up any UI action.
+## ---------------------------------------------------------------------------
+i2c:
+  sda: GPIO6
+  scl: GPIO4
+  scan: true
+
+touchscreen:
+  - platform: ft63x6
+    id: my_touch
+    interrupt_pin: GPIO7
+    reset_pin: GPIO5
+    # Match the display's landscape rotation; adjust on-bench until a tap
+    # top-left registers top-left (see bring-up gate in docs/hardware-35.md).
+    # Calibrated on-bench 2026-11-11 with 4-corner taps. Final result:
+    #   X tracked correctly with no mirror; Y was inverted (physical top read
+    #   high, bottom read low) so mirror_y is required.
+    #   TL->(0,0)  TR->(480,0)  BL->(0,320)  BR->(480,320)
+    transform:
+      swap_xy: true
+      mirror_x: false
+      mirror_y: true
+    on_touch:
+      - lambda: |-
+          ESP_LOGI("touch", "x=%d y=%d (raw x=%d y=%d)",
+                   touch.x, touch.y, touch.x_raw, touch.y_raw);
 
 display:
   - platform: ili9xxx
@@ -180,6 +220,24 @@ text_sensor:
     entity_id: sensor.homelab_kubernetes_health
     on_value: { then: [ script.execute: refresh_k8s ] }
 
+  # Per-node running-VM list (preformatted text from the bridge's `lines`
+  # attribute). Rendered on the detail page when a node row is tapped.
+  - platform: homeassistant
+    id: node1_vms
+    entity_id: sensor.kubelab_1_vms
+    attribute: lines
+    on_value: { then: [ script.execute: refresh_detail ] }
+  - platform: homeassistant
+    id: node2_vms
+    entity_id: sensor.kubelab_2_vms
+    attribute: lines
+    on_value: { then: [ script.execute: refresh_detail ] }
+  - platform: homeassistant
+    id: node3_vms
+    entity_id: sensor.kubelab_3_vms
+    attribute: lines
+    on_value: { then: [ script.execute: refresh_detail ] }
+
 ## ---------------------------------------------------------------------------
 ## Render scripts
 ## ---------------------------------------------------------------------------
@@ -242,6 +300,8 @@ script:
             lv_bar_set_value(tmp_bar[i], kt?(int)tmp[i]:0, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(tmp_bar[i], lv_color_hex(tc), (int)LV_PART_INDICATOR);
           }
+      # Keep an open detail page in sync with the same data.
+      - script.execute: refresh_detail
 
   - id: refresh_k8s
     then:
@@ -264,6 +324,38 @@ script:
           }
           lv_label_set_text(id(k8s_label), txt.c_str());
           lv_obj_set_style_text_color(id(k8s_dot), lv_color_hex(col), 0);
+
+  # Fill the single reusable detail page from the currently-selected node
+  # (id(sel_node), 0..2). Shows the node's RUNNING Proxmox VMs (name/cpu/mem)
+  # from the bridge's preformatted `lines` attribute — node CPU/MEM/TEMP stay
+  # on the overview. Called when the detail page opens and when VM data updates.
+  - id: refresh_detail
+    then:
+      - lambda: |-
+          const char* names[3] = {"kubelab-1", "kubelab-2", "kubelab-3"};
+          std::string vmtxt[3] = {
+            id(node1_vms).has_state() ? id(node1_vms).state : std::string(""),
+            id(node2_vms).has_state() ? id(node2_vms).state : std::string(""),
+            id(node3_vms).has_state() ? id(node3_vms).state : std::string("")
+          };
+          int i = id(sel_node);
+          if (i < 0 || i > 2) i = 0;
+
+          lv_label_set_text(id(d_name), names[i]);
+
+          std::string body = vmtxt[i];
+          if (body.empty()) body = "(loading VMs...)";
+          lv_label_set_text(id(d_vmlist), body.c_str());
+
+          // count = number of newline-separated lines (unless the placeholder)
+          int cnt = 0;
+          if (!body.empty() && body[0] != '(') {
+            cnt = 1;
+            for (char c : body) if (c == '\n') cnt++;
+          }
+          char h[32];
+          snprintf(h, sizeof(h), "%d running VM%s", cnt, cnt==1?"":"s");
+          lv_label_set_text(id(d_vmcount), h);
 
 interval:
   - interval: 5s
@@ -299,6 +391,11 @@ font:
     file: "gfonts://Montserrat@700"
     size: 16
     glyphs: ["\U00002022"]
+  - id: mono_font
+    # Monospaced font so the per-VM "name  cpu%  mem%" columns line up on the
+    # detail page (Montserrat is proportional and would misalign the columns).
+    file: "gfonts://Roboto+Mono@500"
+    size: 16
 
 ## ---------------------------------------------------------------------------
 ## LVGL — ONE page, 480x320 landscape. Columns: NODE | CPU | MEM | TEMP.
@@ -355,6 +452,49 @@ lvgl:
         - label: { id: n3_tmp,  text: "--", x: 385, y: 172, text_font: montserrat_16 }
         - bar:   { id: n3_tmpb, x: 385, y: 194, width: 80, height: 7, min_value: 0, max_value: 100, value: 0 }
 
+        # ---- transparent tap targets over each node row -> open detail page ----
+        # Drawn last so they sit above the row labels/bars and catch the tap.
+        # Fully transparent (bg opa 0) so the row looks unchanged.
+        - button:
+            id: n1_hit
+            x: 8
+            y: 80
+            width: 464
+            height: 40
+            bg_opa: 0
+            border_width: 0
+            shadow_width: 0
+            on_click:
+              - lambda: 'id(sel_node) = 0;'
+              - script.execute: refresh_detail
+              - lvgl.page.show: detail_page
+        - button:
+            id: n2_hit
+            x: 8
+            y: 124
+            width: 464
+            height: 40
+            bg_opa: 0
+            border_width: 0
+            shadow_width: 0
+            on_click:
+              - lambda: 'id(sel_node) = 1;'
+              - script.execute: refresh_detail
+              - lvgl.page.show: detail_page
+        - button:
+            id: n3_hit
+            x: 8
+            y: 168
+            width: 464
+            height: 40
+            bg_opa: 0
+            border_width: 0
+            shadow_width: 0
+            on_click:
+              - lambda: 'id(sel_node) = 2;'
+              - script.execute: refresh_detail
+              - lvgl.page.show: detail_page
+
         # ---- kubernetes row ----
         - line:  { points: [[12, 224], [468, 224]], line_color: 0x27313F, line_width: 1 }
         - label: { id: k8s_dot, text: "\u2022", x: 12, y: 234, text_color: 0x829AA8, text_font: dot_font }
@@ -363,3 +503,42 @@ lvgl:
         # ---- footer ----
         - line:  { points: [[12, 268], [468, 268]], line_color: 0x27313F, line_width: 1 }
         - label: { id: foot_label, text: "Starting...", x: 12, y: 278, text_color: 0x829AA8, text_font: montserrat_16 }
+
+    ## -----------------------------------------------------------------------
+    ## Detail page — RUNNING Proxmox VMs on the tapped node (id(sel_node)).
+    ## Opened by tapping a node row on the overview; "< BACK" returns home.
+    ## -----------------------------------------------------------------------
+    - id: detail_page
+      widgets:
+        # header: back button + node name + running VM count
+        - button:
+            id: d_back
+            x: 8
+            y: 8
+            width: 110
+            height: 34
+            bg_color: 0x1B2535
+            border_width: 0
+            shadow_width: 0
+            widgets:
+              - label: { text: "< BACK", align: CENTER, text_color: 0x75D8FD, text_font: montserrat_16 }
+            on_click:
+              - lvgl.page.show: main_page
+        - label: { id: d_name,    text: "kubelab-?", x: 140, y: 12, text_color: 0x75D8FD, text_font: montserrat_22 }
+        - label: { id: d_vmcount, text: "-- VMs", x: 330, y: 18, text_color: 0x829AA8, text_font: montserrat_16 }
+        - line:  { points: [[12, 50], [468, 50]], line_color: 0x27313F, line_width: 2 }
+
+        # column header (monospace, aligned with the list below)
+        - label: { text: "VM                    CPU   MEM", x: 16, y: 58, text_color: 0x829AA8, text_font: mono_font }
+        - line:  { points: [[12, 80], [468, 80]], line_color: 0x27313F, line_width: 1 }
+
+        # VM list — one preformatted monospace block from the bridge `lines` attr
+        - label:
+            id: d_vmlist
+            text: "(loading VMs...)"
+            x: 16
+            y: 88
+            text_color: 0xE8F2FA
+            text_font: mono_font
+
+        - label: { text: "running VMs only - busiest first - tap BACK to return", x: 16, y: 296, text_color: 0x4A5A6A, text_font: montserrat_14 }
