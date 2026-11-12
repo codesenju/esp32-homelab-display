@@ -202,6 +202,35 @@ sensor:
     entity_id: sensor.homelab_kubernetes_pods_not_ready
     on_value: { then: [ script.execute: refresh_k8s ] }
 
+## ---------------------------------------------------------------------------
+## Light on/off states (for the Controls page button colours)
+## ---------------------------------------------------------------------------
+binary_sensor:
+  - platform: homeassistant
+    id: light_off1
+    entity_id: light.office_office_light_1
+    on_state: { then: [ script.execute: refresh_lights ] }
+  - platform: homeassistant
+    id: light_off2
+    entity_id: light.office_office_light_2
+    on_state: { then: [ script.execute: refresh_lights ] }
+  - platform: homeassistant
+    id: light_bed1
+    entity_id: light.bedroom_light_1
+    on_state: { then: [ script.execute: refresh_lights ] }
+  - platform: homeassistant
+    id: light_bed2
+    entity_id: light.bedroom_light_2
+    on_state: { then: [ script.execute: refresh_lights ] }
+  - platform: homeassistant
+    id: light_bed3
+    entity_id: light.bedroom_bedroom_light_3
+    on_state: { then: [ script.execute: refresh_lights ] }
+  - platform: homeassistant
+    id: light_bed4
+    entity_id: light.bedroom_bedroom_light_4
+    on_state: { then: [ script.execute: refresh_lights ] }
+
 text_sensor:
   - platform: homeassistant
     id: node1_status
@@ -357,6 +386,25 @@ script:
           snprintf(h, sizeof(h), "%d running VM%s", cnt, cnt==1?"":"s");
           lv_label_set_text(id(d_vmcount), h);
 
+  # Update the 6 light buttons: background colour (amber on / dark off) AND an
+  # explicit ON/OFF status label, so the state is readable from across a room.
+  - id: refresh_lights
+    then:
+      - lambda: |-
+          lv_obj_t* btn[6] = {id(lb_off1), id(lb_off2), id(lb_bed1), id(lb_bed2), id(lb_bed3), id(lb_bed4)};
+          lv_obj_t* st[6]  = {id(ls_off1), id(ls_off2), id(ls_bed1), id(ls_bed2), id(ls_bed3), id(ls_bed4)};
+          bool on[6] = {
+            id(light_off1).state, id(light_off2).state,
+            id(light_bed1).state, id(light_bed2).state,
+            id(light_bed3).state, id(light_bed4).state
+          };
+          for (int i = 0; i < 6; i++) {
+            uint32_t bg = on[i] ? 0x4A3A10 : 0x1B2535;   // warm tint on / dark off
+            lv_obj_set_style_bg_color(btn[i], lv_color_hex(bg), 0);
+            lv_label_set_text(st[i], on[i] ? "ON" : "OFF");
+            lv_obj_set_style_text_color(st[i], lv_color_hex(on[i] ? 0xF4C14E : 0x5A6A7A), 0);
+          }
+
 interval:
   - interval: 5s
     then:
@@ -503,6 +551,21 @@ lvgl:
         # ---- footer ----
         - line:  { points: [[12, 268], [468, 268]], line_color: 0x27313F, line_width: 1 }
         - label: { id: foot_label, text: "Starting...", x: 12, y: 278, text_color: 0x829AA8, text_font: montserrat_16 }
+        # CONTROLS nav button (opens the lights/scenes page)
+        - button:
+            id: ctl_nav
+            x: 360
+            y: 274
+            width: 108
+            height: 34
+            bg_color: 0x1B2535
+            border_width: 0
+            shadow_width: 0
+            widgets:
+              - label: { text: "CONTROLS >", align: CENTER, text_color: 0x75D8FD, text_font: montserrat_16 }
+            on_click:
+              - script.execute: refresh_lights
+              - lvgl.page.show: controls_page
 
     ## -----------------------------------------------------------------------
     ## Detail page — RUNNING Proxmox VMs on the tapped node (id(sel_node)).
@@ -542,3 +605,213 @@ lvgl:
             text_font: mono_font
 
         - label: { text: "running VMs only - busiest first - tap BACK to return", x: 16, y: 296, text_color: 0x4A5A6A, text_font: montserrat_14 }
+
+    ## -----------------------------------------------------------------------
+    ## Controls page — room tabs (Office / Bedroom) + Scenes. Each light is a
+    ## wide button showing name + ON/OFF status (readable from across a room).
+    ## Low-risk, reversible -> single tap. Each action is an HA service call.
+    ## -----------------------------------------------------------------------
+    - id: controls_page
+      widgets:
+        - button:
+            id: c_back
+            x: 8
+            y: 8
+            width: 100
+            height: 34
+            bg_color: 0x1B2535
+            border_width: 0
+            shadow_width: 0
+            widgets:
+              - label: { text: "< BACK", align: CENTER, text_color: 0x75D8FD, text_font: montserrat_16 }
+            on_click:
+              - lvgl.page.show: main_page
+        - label: { text: "CONTROLS", x: 120, y: 12, text_color: 0x75D8FD, text_font: montserrat_22 }
+
+        # Tabview: swipe between tabs or tap the tab names at the top.
+        - tabview:
+            id: ctl_tabs
+            position: top
+            y: 50
+            x: 0
+            width: 480
+            height: 270
+            on_value:
+              - script.execute: refresh_lights
+            tabs:
+              - name: "OFFICE"
+                id: tab_office
+                widgets:
+                  - button:
+                      id: lb_off1
+                      x: 8
+                      y: 6
+                      width: 448
+                      height: 48
+                      bg_color: 0x1B2535
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Office 1", align: LEFT_MID, x: 16, text_color: 0xE8F2FA, text_font: montserrat_22 }
+                        - label: { id: ls_off1, text: "OFF", align: RIGHT_MID, x: -16, text_color: 0x5A6A7A, text_font: montserrat_22 }
+                      on_click:
+                        - homeassistant.action:
+                            action: light.toggle
+                            data: { entity_id: light.office_office_light_1 }
+                  - button:
+                      id: lb_off2
+                      x: 8
+                      y: 60
+                      width: 448
+                      height: 48
+                      bg_color: 0x1B2535
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Office 2", align: LEFT_MID, x: 16, text_color: 0xE8F2FA, text_font: montserrat_22 }
+                        - label: { id: ls_off2, text: "OFF", align: RIGHT_MID, x: -16, text_color: 0x5A6A7A, text_font: montserrat_22 }
+                      on_click:
+                        - homeassistant.action:
+                            action: light.toggle
+                            data: { entity_id: light.office_office_light_2 }
+                  # office scenes
+                  - label: { text: "SCENES", x: 8, y: 116, text_color: 0xB58BF0, text_font: montserrat_14 }
+                  - button:
+                      x: 8
+                      y: 136
+                      width: 220
+                      height: 48
+                      bg_color: 0x2A2140
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Focus", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: scene.turn_on
+                            data: { entity_id: scene.jazziro_focus }
+                  - button:
+                      x: 236
+                      y: 136
+                      width: 220
+                      height: 48
+                      bg_color: 0x2A2140
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Lerato Focus", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: scene.turn_on
+                            data: { entity_id: scene.lerato_study_focus }
+              - name: "BEDROOM"
+                id: tab_bedroom
+                widgets:
+                  - button:
+                      id: lb_bed1
+                      x: 8
+                      y: 6
+                      width: 220
+                      height: 48
+                      bg_color: 0x1B2535
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Bed 1", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                        - label: { id: ls_bed1, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: light.toggle
+                            data: { entity_id: light.bedroom_light_1 }
+                  - button:
+                      id: lb_bed2
+                      x: 236
+                      y: 6
+                      width: 220
+                      height: 48
+                      bg_color: 0x1B2535
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Bed 2", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                        - label: { id: ls_bed2, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: light.toggle
+                            data: { entity_id: light.bedroom_light_2 }
+                  - button:
+                      id: lb_bed3
+                      x: 8
+                      y: 58
+                      width: 220
+                      height: 48
+                      bg_color: 0x1B2535
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Bed 3", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                        - label: { id: ls_bed3, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: light.toggle
+                            data: { entity_id: light.bedroom_bedroom_light_3 }
+                  - button:
+                      id: lb_bed4
+                      x: 236
+                      y: 58
+                      width: 220
+                      height: 48
+                      bg_color: 0x1B2535
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Bed 4", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                        - label: { id: ls_bed4, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: light.toggle
+                            data: { entity_id: light.bedroom_bedroom_light_4 }
+                  # bedroom scenes
+                  - label: { text: "SCENES", x: 8, y: 112, text_color: 0xB58BF0, text_font: montserrat_14 }
+                  - button:
+                      x: 8
+                      y: 132
+                      width: 144
+                      height: 46
+                      bg_color: 0x2A2140
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Romance", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: scene.turn_on
+                            data: { entity_id: scene.romance }
+                  - button:
+                      x: 160
+                      y: 132
+                      width: 144
+                      height: 46
+                      bg_color: 0x2A2140
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "TLC", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: scene.turn_on
+                            data: { entity_id: scene.tlc }
+                  - button:
+                      x: 312
+                      y: 132
+                      width: 144
+                      height: 46
+                      bg_color: 0x2A2140
+                      border_width: 0
+                      shadow_width: 0
+                      widgets:
+                        - label: { text: "Default", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                      on_click:
+                        - homeassistant.action:
+                            action: scene.turn_on
+                            data: { entity_id: scene.default }
