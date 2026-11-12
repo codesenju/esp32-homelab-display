@@ -163,7 +163,7 @@ def collect_proxmox():
         name = name.strip()
         n = by_name.get(name)
         if not n:
-            out[name] = {"status": "offline", "cpu": None, "mem": None, "uptime": None}
+            out[name] = {"status": "offline", "cpu": None, "mem": None, "uptime": None, "disk": None}
             continue
         status = n.get("status", "unknown")
         if status == "online":
@@ -173,7 +173,22 @@ def collect_proxmox():
             uptime = int(n.get("uptime", 0))
         else:
             cpu = mem = uptime = None
-        out[name] = {"status": status, "cpu": cpu, "mem": mem, "uptime": uptime}
+        # Disk usage: prefer local-lvm (VM storage pool), else local. Only when
+        # the node is online. Reported as a percentage of the pool.
+        disk = None
+        if status == "online":
+            try:
+                stores = pve_get(f"/nodes/{name}/storage")
+                by_store = {s.get("storage"): s for s in stores}
+                pick = by_store.get("local-lvm") or by_store.get("local")
+                if pick:
+                    tot = float(pick.get("total", 0)) or 0.0
+                    used = float(pick.get("used", 0))
+                    if tot > 0:
+                        disk = round(used / tot * 100.0, 1)
+            except Exception as e:
+                log(f"storage query {name} failed: {e}")
+        out[name] = {"status": status, "cpu": cpu, "mem": mem, "uptime": uptime, "disk": disk}
     return out
 
 
@@ -378,6 +393,15 @@ def publish(proxmox, k8s, temps=None, vms=None):
             mem if mem is not None else "unavailable",
             {**base_attr, "unit_of_measurement": "%", "friendly_name": f"{name} memory usage",
              "icon": "mdi:memory"},
+        )
+        # Disk (local-lvm pool usage %)
+        total += 1
+        disk = data.get("disk")
+        ok += ha_set_state(
+            f"sensor.{slug}_disk_usage",
+            disk if disk is not None else "unavailable",
+            {**base_attr, "unit_of_measurement": "%", "friendly_name": f"{name} disk usage",
+             "icon": "mdi:harddisk"},
         )
         # Status
         total += 1

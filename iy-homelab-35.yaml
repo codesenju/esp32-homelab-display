@@ -80,6 +80,12 @@ globals:
     type: int
     restore_value: no
     initial_value: "0"
+  # Attention-pulse phase: flips each tick so an indicator can "breathe" while
+  # something needs attention. A healthy screen never pulses (phase ignored).
+  - id: pulse_on
+    type: bool
+    restore_value: no
+    initial_value: "false"
 
 spi:
   clk_pin: GPIO14
@@ -175,6 +181,19 @@ sensor:
   - platform: homeassistant
     id: node3_mem
     entity_id: sensor.kubelab_3_memory_usage
+    on_value: { then: [ script.execute: refresh_nodes ] }
+
+  - platform: homeassistant
+    id: node1_disk
+    entity_id: sensor.kubelab_1_disk_usage
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node2_disk
+    entity_id: sensor.kubelab_2_disk_usage
+    on_value: { then: [ script.execute: refresh_nodes ] }
+  - platform: homeassistant
+    id: node3_disk
+    entity_id: sensor.kubelab_3_disk_usage
     on_value: { then: [ script.execute: refresh_nodes ] }
 
   - platform: homeassistant
@@ -278,6 +297,7 @@ script:
           float cpu[3] = {id(node1_cpu).state, id(node2_cpu).state, id(node3_cpu).state};
           float mem[3] = {id(node1_mem).state, id(node2_mem).state, id(node3_mem).state};
           float tmp[3] = {id(node1_temp).state, id(node2_temp).state, id(node3_temp).state};
+          float dsk[3] = {id(node1_disk).state, id(node2_disk).state, id(node3_disk).state};
           std::string st[3] = {id(node1_status).state, id(node2_status).state, id(node3_status).state};
           lv_obj_t* name_lbl[3] = {id(n1_name), id(n2_name), id(n3_name)};
           lv_obj_t* dot[3]      = {id(n1_dot),  id(n2_dot),  id(n3_dot)};
@@ -287,6 +307,8 @@ script:
           lv_obj_t* mem_bar[3]  = {id(n1_memb), id(n2_memb), id(n3_memb)};
           lv_obj_t* tmp_lbl[3]  = {id(n1_tmp),  id(n2_tmp),  id(n3_tmp)};
           lv_obj_t* tmp_bar[3]  = {id(n1_tmpb), id(n2_tmpb), id(n3_tmpb)};
+          lv_obj_t* dsk_lbl[3]  = {id(n1_dsk),  id(n2_dsk),  id(n3_dsk)};
+          lv_obj_t* dsk_bar[3]  = {id(n1_dskb), id(n2_dskb), id(n3_dskb)};
 
           for (int i = 0; i < 3; i++) {
             bool online = (st[i] == "online");
@@ -294,6 +316,7 @@ script:
             bool kc = online && !std::isnan(cpu[i]);
             bool km = online && !std::isnan(mem[i]);
             bool kt = online && !std::isnan(tmp[i]);
+            bool kd = online && !std::isnan(dsk[i]);
 
             lv_label_set_text(name_lbl[i], names[i]);
 
@@ -328,6 +351,12 @@ script:
             uint32_t tc = !kt ? dcol : (tmp[i]>=85?0xE8564B:(tmp[i]>=70?0xF4C14E:0x66D9A0));
             lv_bar_set_value(tmp_bar[i], kt?(int)tmp[i]:0, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(tmp_bar[i], lv_color_hex(tc), (int)LV_PART_INDICATOR);
+            // DISK (local-lvm %; <60 green, 60-85 amber, >=85 red)
+            if (kd) snprintf(b, sizeof(b), "%.0f%%", dsk[i]); else snprintf(b, sizeof(b), down?"DOWN":"--");
+            lv_label_set_text(dsk_lbl[i], b);
+            uint32_t dc = !kd ? dcol : (dsk[i]>=85?0xE8564B:(dsk[i]>=60?0xF4C14E:0x66D9A0));
+            lv_bar_set_value(dsk_bar[i], kd?(int)dsk[i]:0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(dsk_bar[i], lv_color_hex(dc), (int)LV_PART_INDICATOR);
           }
       # Keep an open detail page in sync with the same data.
       - script.execute: refresh_detail
@@ -352,6 +381,7 @@ script:
             txt = b;
           }
           lv_label_set_text(id(k8s_label), txt.c_str());
+          lv_obj_set_style_text_color(id(k8s_label), lv_color_hex(col), 0);
           lv_obj_set_style_text_color(id(k8s_dot), lv_color_hex(col), 0);
 
   # Fill the single reusable detail page from the currently-selected node
@@ -386,23 +416,27 @@ script:
           snprintf(h, sizeof(h), "%d running VM%s", cnt, cnt==1?"":"s");
           lv_label_set_text(id(d_vmcount), h);
 
-  # Update the 6 light buttons: background colour (amber on / dark off) AND an
-  # explicit ON/OFF status label, so the state is readable from across a room.
+  # Drive the 6 light switches (beui Switch): ON -> track amber + thumb slides
+  # right and brightens; OFF -> track slate + thumb left and dim. Thumb travel
+  # = track width - thumb width - 2*inset. Office track 56/thumb22 -> x 3..31;
+  # bedroom track 48/thumb18 -> x 3..27.
   - id: refresh_lights
     then:
       - lambda: |-
-          lv_obj_t* btn[6] = {id(lb_off1), id(lb_off2), id(lb_bed1), id(lb_bed2), id(lb_bed3), id(lb_bed4)};
-          lv_obj_t* st[6]  = {id(ls_off1), id(ls_off2), id(ls_bed1), id(ls_bed2), id(ls_bed3), id(ls_bed4)};
           bool on[6] = {
             id(light_off1).state, id(light_off2).state,
             id(light_bed1).state, id(light_bed2).state,
             id(light_bed3).state, id(light_bed4).state
           };
+          lv_obj_t* track[6] = {id(sw_off1), id(sw_off2), id(sw_bed1), id(sw_bed2), id(sw_bed3), id(sw_bed4)};
+          lv_obj_t* thumb[6] = {id(th_off1), id(th_off2), id(th_bed1), id(th_bed2), id(th_bed3), id(th_bed4)};
+          int thumb_on_x[6] = {31, 31, 27, 27, 27, 27};  // office vs bedroom travel
           for (int i = 0; i < 6; i++) {
-            uint32_t bg = on[i] ? 0x4A3A10 : 0x1B2535;   // warm tint on / dark off
-            lv_obj_set_style_bg_color(btn[i], lv_color_hex(bg), 0);
-            lv_label_set_text(st[i], on[i] ? "ON" : "OFF");
-            lv_obj_set_style_text_color(st[i], lv_color_hex(on[i] ? 0xF4C14E : 0x5A6A7A), 0);
+            uint32_t tcol = on[i] ? 0xF4C14E : 0x27313F;        // track: amber on / slate off
+            uint32_t hcol = on[i] ? 0x1B2535 : 0x5A6A7A;        // thumb: dark knob on amber / grey off
+            lv_obj_set_style_bg_color(track[i], lv_color_hex(tcol), 0);
+            lv_obj_set_style_bg_color(thumb[i], lv_color_hex(hcol), 0);
+            lv_obj_set_x(thumb[i], on[i] ? thumb_on_x[i] : 3);
           }
 
 interval:
@@ -431,6 +465,22 @@ interval:
           if (!ha || (id(last_k8s_update)>0 && now-id(last_k8s_update) > ${stale_after}))
             lv_obj_set_style_text_color(id(k8s_dot), lv_color_hex(0x829AA8), 0);
 
+  # Attention pulse (beui Animated Badge "pulse feedback"), done with a plain
+  # 700ms interval instead of the LVGL animation engine (unsupported in this
+  # ESPHome build) — the connectivity chip breathes ONLY while HA is down, so a
+  # healthy screen is perfectly still. Motion here means "look here".
+  - interval: 700ms
+    then:
+      - lambda: |-
+          bool ha = api::global_api_server != nullptr && api::global_api_server->is_connected();
+          if (ha) {
+            lv_obj_set_style_opa(id(hdr_conn), 255, 0);   // solid when healthy
+            id(pulse_on) = false;
+            return;
+          }
+          id(pulse_on) = !id(pulse_on);
+          lv_obj_set_style_opa(id(hdr_conn), id(pulse_on) ? 90 : 255, 0);
+
 font:
   - id: dot_font
     # size matched to the row text (montserrat_16) so the dot box and the
@@ -455,102 +505,135 @@ lvgl:
     - main_display
   bg_color: 0x0E1420
   text_color: 0xE8F2FA
+  # Global button feel (beui "spring-pressed" Button, translated to LVGL):
+  # every button gets a tactile pressed look — darker fill + a 2px inset (via
+  # translate/transform) so the tap reads physically. Applied cluster-wide via
+  # theme so the whole UI shares one press language, not per-button costumes.
+  # (Animated easing lives in the page transitions and the light switch thumb;
+  #  ESPHome's LVGL layer applies state styles instantly, which on a 20MHz SPI
+  #  panel is the right call — a crisp press beats a janky per-button tween.)
+  theme:
+    button:
+      pressed:
+        translate_y: 2
+        transform_height: -2
+        transform_width: -2
   pages:
     - id: main_page
       widgets:
         # ---- header ----
-        - label: { text: "KUBELAB", x: 12, y: 8, text_color: 0x75D8FD, text_font: montserrat_22 }
-        - label: { id: hdr_clock, text: "--:--", x: 330, y: 8, text_font: montserrat_22 }
-        - label: { id: hdr_conn, text: "WiFi", x: 420, y: 14, text_color: 0x829AA8, text_font: montserrat_16 }
-        - line:  { points: [[12, 44], [468, 44]], line_color: 0x27313F, line_width: 2 }
+        - label: { text: "KUBELAB", x: 14, y: 10, text_color: 0x75D8FD, text_font: montserrat_22 }
+        - label: { id: hdr_clock, text: "--:--", x: 330, y: 10, text_font: montserrat_22 }
+        - label: { id: hdr_conn, text: "WiFi", x: 424, y: 16, text_color: 0x829AA8, text_font: montserrat_16 }
 
-        # ---- column headers ----
-        - label: { text: "NODE", x: 14,  y: 52, text_color: 0x829AA8, text_font: montserrat_16 }
-        - label: { text: "CPU",  x: 150, y: 52, text_color: 0x66D9A0, text_font: montserrat_16 }
-        - label: { text: "MEM",  x: 265, y: 52, text_color: 0xB58BF0, text_font: montserrat_16 }
-        - label: { text: "TEMP", x: 385, y: 52, text_color: 0xF2A65A, text_font: montserrat_16 }
+        # ---- column headers (aligned to the card content columns) ----
+        - label: { text: "NODE", x: 26,  y: 50, text_color: 0x5A6A7A, text_font: montserrat_14 }
+        - label: { text: "CPU",  x: 150, y: 50, text_color: 0x66D9A0, text_font: montserrat_14 }
+        - label: { text: "MEM",  x: 230, y: 50, text_color: 0xB58BF0, text_font: montserrat_14 }
+        - label: { text: "DISK", x: 310, y: 50, text_color: 0x5AC8E8, text_font: montserrat_14 }
+        - label: { text: "TEMP", x: 390, y: 50, text_color: 0xF2A65A, text_font: montserrat_14 }
 
-        # ===== node row 1 (y base 84) =====
-        - label: { id: n1_dot,  text: "\u2022", x: 12, y: 98, text_color: 0x829AA8, text_font: dot_font }
-        - label: { id: n1_name, text: "kubelab-1", x: 30, y: 98, text_font: montserrat_16 }
-        - label: { id: n1_cpu,  text: "--", x: 150, y: 84, text_font: montserrat_16 }
-        - bar:   { id: n1_cpub, x: 150, y: 106, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: n1_mem,  text: "--", x: 265, y: 84, text_font: montserrat_16 }
-        - bar:   { id: n1_memb, x: 265, y: 106, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: n1_tmp,  text: "--", x: 385, y: 84, text_font: montserrat_16 }
-        - bar:   { id: n1_tmpb, x: 385, y: 106, width: 80, height: 7, min_value: 0, max_value: 100, value: 0 }
-
-        # ===== node row 2 (y base 128) =====
-        - label: { id: n2_dot,  text: "\u2022", x: 12, y: 142, text_color: 0x829AA8, text_font: dot_font }
-        - label: { id: n2_name, text: "kubelab-2", x: 30, y: 142, text_font: montserrat_16 }
-        - label: { id: n2_cpu,  text: "--", x: 150, y: 128, text_font: montserrat_16 }
-        - bar:   { id: n2_cpub, x: 150, y: 150, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: n2_mem,  text: "--", x: 265, y: 128, text_font: montserrat_16 }
-        - bar:   { id: n2_memb, x: 265, y: 150, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: n2_tmp,  text: "--", x: 385, y: 128, text_font: montserrat_16 }
-        - bar:   { id: n2_tmpb, x: 385, y: 150, width: 80, height: 7, min_value: 0, max_value: 100, value: 0 }
-
-        # ===== node row 3 (y base 172) =====
-        - label: { id: n3_dot,  text: "\u2022", x: 12, y: 186, text_color: 0x829AA8, text_font: dot_font }
-        - label: { id: n3_name, text: "kubelab-3", x: 30, y: 186, text_font: montserrat_16 }
-        - label: { id: n3_cpu,  text: "--", x: 150, y: 172, text_font: montserrat_16 }
-        - bar:   { id: n3_cpub, x: 150, y: 194, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: n3_mem,  text: "--", x: 265, y: 172, text_font: montserrat_16 }
-        - bar:   { id: n3_memb, x: 265, y: 194, width: 95, height: 7, min_value: 0, max_value: 100, value: 0 }
-        - label: { id: n3_tmp,  text: "--", x: 385, y: 172, text_font: montserrat_16 }
-        - bar:   { id: n3_tmpb, x: 385, y: 194, width: 80, height: 7, min_value: 0, max_value: 100, value: 0 }
-
-        # ---- transparent tap targets over each node row -> open detail page ----
-        # Drawn last so they sit above the row labels/bars and catch the tap.
-        # Fully transparent (bg opa 0) so the row looks unchanged.
+        # ===== node rows as tappable cards (new theme: rounded 0x1B2535 surface,
+        #       content as children, built-in spring-press + tap-to-detail) =====
         - button:
             id: n1_hit
             x: 8
-            y: 80
+            y: 68
             width: 464
-            height: 40
-            bg_opa: 0
+            height: 46
+            radius: 10
+            bg_color: 0x1B2535
+            bg_opa: COVER
             border_width: 0
             shadow_width: 0
+            pad_all: 0
             on_click:
               - lambda: 'id(sel_node) = 0;'
               - script.execute: refresh_detail
               - lvgl.page.show: detail_page
+            widgets:
+              - label: { id: n1_dot,  text: "\u2022", x: 14, y: 0, align: LEFT_MID, text_color: 0x829AA8, text_font: dot_font }
+              - label: { id: n1_name, text: "kubelab-1", x: 32, y: 0, align: LEFT_MID, text_font: montserrat_16 }
+              - label: { id: n1_cpu,  text: "--", x: 150, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n1_cpub, x: 150, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n1_mem,  text: "--", x: 230, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n1_memb, x: 230, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n1_tmp,  text: "--", x: 390, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n1_tmpb, x: 390, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n1_dsk,  text: "--", x: 310, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n1_dskb, x: 310, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
         - button:
             id: n2_hit
             x: 8
-            y: 124
+            y: 120
             width: 464
-            height: 40
-            bg_opa: 0
+            height: 46
+            radius: 10
+            bg_color: 0x1B2535
+            bg_opa: COVER
             border_width: 0
             shadow_width: 0
+            pad_all: 0
             on_click:
               - lambda: 'id(sel_node) = 1;'
               - script.execute: refresh_detail
               - lvgl.page.show: detail_page
+            widgets:
+              - label: { id: n2_dot,  text: "\u2022", x: 14, y: 0, align: LEFT_MID, text_color: 0x829AA8, text_font: dot_font }
+              - label: { id: n2_name, text: "kubelab-2", x: 32, y: 0, align: LEFT_MID, text_font: montserrat_16 }
+              - label: { id: n2_cpu,  text: "--", x: 150, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n2_cpub, x: 150, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n2_mem,  text: "--", x: 230, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n2_memb, x: 230, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n2_tmp,  text: "--", x: 390, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n2_tmpb, x: 390, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n2_dsk,  text: "--", x: 310, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n2_dskb, x: 310, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
         - button:
             id: n3_hit
             x: 8
-            y: 168
+            y: 172
             width: 464
-            height: 40
-            bg_opa: 0
+            height: 46
+            radius: 10
+            bg_color: 0x1B2535
+            bg_opa: COVER
             border_width: 0
             shadow_width: 0
+            pad_all: 0
             on_click:
               - lambda: 'id(sel_node) = 2;'
               - script.execute: refresh_detail
               - lvgl.page.show: detail_page
+            widgets:
+              - label: { id: n3_dot,  text: "\u2022", x: 14, y: 0, align: LEFT_MID, text_color: 0x829AA8, text_font: dot_font }
+              - label: { id: n3_name, text: "kubelab-3", x: 32, y: 0, align: LEFT_MID, text_font: montserrat_16 }
+              - label: { id: n3_cpu,  text: "--", x: 150, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n3_cpub, x: 150, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n3_mem,  text: "--", x: 230, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n3_memb, x: 230, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n3_tmp,  text: "--", x: 390, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n3_tmpb, x: 390, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
+              - label: { id: n3_dsk,  text: "--", x: 310, y: 6, text_font: montserrat_16 }
+              - bar:   { id: n3_dskb, x: 310, y: 30, width: 64, height: 6, radius: 3, min_value: 0, max_value: 100, value: 0 }
 
-        # ---- kubernetes row ----
-        - line:  { points: [[12, 224], [468, 224]], line_color: 0x27313F, line_width: 1 }
-        - label: { id: k8s_dot, text: "\u2022", x: 12, y: 234, text_color: 0x829AA8, text_font: dot_font }
-        - label: { id: k8s_label, text: "K8S  --", x: 30, y: 234, text_font: montserrat_16 }
+        # ---- kubernetes row (rounded surface to match the node cards) ----
+        - obj:
+            x: 8
+            y: 224
+            width: 464
+            height: 34
+            radius: 10
+            bg_color: 0x161E2C
+            bg_opa: COVER
+            border_width: 0
+            pad_all: 0
+            widgets:
+              - label: { id: k8s_dot, text: "\u2022", x: 14, y: 0, align: LEFT_MID, text_color: 0x829AA8, text_font: dot_font }
+              - label: { id: k8s_label, text: "K8S  --", x: 32, y: 0, align: LEFT_MID, text_color: 0xE8F2FA, text_font: montserrat_16 }
 
         # ---- footer ----
-        - line:  { points: [[12, 268], [468, 268]], line_color: 0x27313F, line_width: 1 }
-        - label: { id: foot_label, text: "Starting...", x: 12, y: 278, text_color: 0x829AA8, text_font: montserrat_16 }
+        - label: { id: foot_label, text: "Starting...", x: 14, y: 272, text_color: 0x5A6A7A, text_font: montserrat_14 }
         # CONTROLS nav button (opens the lights/scenes page)
         - button:
             id: ctl_nav
@@ -629,6 +712,8 @@ lvgl:
         - label: { text: "CONTROLS", x: 120, y: 12, text_color: 0x75D8FD, text_font: montserrat_22 }
 
         # Tabview: swipe between tabs or tap the tab names at the top.
+        # Dark-themed to match the overview card world — LVGL's default tabview
+        # theme is light, which showed as a white tab bar + bright content area.
         - tabview:
             id: ctl_tabs
             position: top
@@ -636,182 +721,332 @@ lvgl:
             x: 0
             width: 480
             height: 270
+            bg_color: 0x0E1420
+            bg_opa: COVER
+            # Tabs switch ONLY by tapping the tab button — no swipe/drag between
+            # Office/Bedroom, and the change snaps (no slide). The swipe gesture
+            # lives on the tabview content container; clear its SCROLLABLE flag
+            # at boot to disable it (LVGL-documented method).
+            on_boot:
+              - lambda: |-
+                  // Kill swipe + scroll everywhere in the tabview: the content
+                  // wrapper AND each tab page. This removes the horizontal
+                  // scrollbar and stops the other tab's widgets peeking in.
+                  lv_obj_t * content = lv_tabview_get_content(id(ctl_tabs));
+                  if (content) lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+                  lv_obj_clear_flag(id(tab_office), LV_OBJ_FLAG_SCROLLABLE);
+                  lv_obj_clear_flag(id(tab_bedroom), LV_OBJ_FLAG_SCROLLABLE);
+            # tab bar: dark, cyan bottom accent as the indicator baseline;
+            # `items` (nested) styles each tab button + its checked/active state
+            tab_style:
+              bg_color: 0x0E1420
+              bg_opa: COVER
+              border_color: 0x27313F
+              border_width: 1
+              border_side: BOTTOM
+              text_color: 0x5A6A7A
+              pad_all: 0
+              items:
+                bg_color: 0x0E1420
+                bg_opa: COVER
+                text_color: 0x5A6A7A
+                text_font: montserrat_16
+                border_color: 0x75D8FD
+                border_width: 0
+                checked:
+                  text_color: 0x75D8FD
+                  border_color: 0x75D8FD
+                  border_width: 3
+                  border_side: BOTTOM
+            # content area: page background, no light surface
+            content_style:
+              bg_color: 0x0E1420
+              bg_opa: COVER
+              border_width: 0
+              pad_all: 6
             on_value:
               - script.execute: refresh_lights
             tabs:
               - name: "OFFICE"
                 id: tab_office
+                # Centered vertical flex: children are auto-positioned and
+                # constrained inside the tab (no absolute x/y escaping bounds,
+                # so no peeking into the other tab), and centered on the cross
+                # axis. pad_all also sets the inter-row gap.
+                layout:
+                  type: flex
+                  flex_flow: COLUMN
+                  flex_align_main: START
+                  flex_align_cross: CENTER
+                  pad_row: 10
+                pad_all: 10
                 widgets:
                   - button:
                       id: lb_off1
-                      x: 8
-                      y: 6
-                      width: 448
+                      width: 440
                       height: 48
                       bg_color: 0x1B2535
                       border_width: 0
                       shadow_width: 0
                       widgets:
                         - label: { text: "Office 1", align: LEFT_MID, x: 16, text_color: 0xE8F2FA, text_font: montserrat_22 }
-                        - label: { id: ls_off1, text: "OFF", align: RIGHT_MID, x: -16, text_color: 0x5A6A7A, text_font: montserrat_22 }
+                        - obj:
+                            id: sw_off1
+                            x: -16
+                            align: RIGHT_MID
+                            width: 56
+                            height: 28
+                            radius: 14
+                            bg_color: 0x27313F
+                            bg_opa: COVER
+                            border_width: 0
+                            pad_all: 0
+                            widgets:
+                              - obj: { id: th_off1, x: 3, align: LEFT_MID, width: 22, height: 22, radius: 11, bg_color: 0x5A6A7A, bg_opa: COVER, border_width: 0 }
                       on_click:
                         - homeassistant.action:
                             action: light.toggle
                             data: { entity_id: light.office_office_light_1 }
                   - button:
                       id: lb_off2
-                      x: 8
-                      y: 60
-                      width: 448
+                      width: 440
                       height: 48
                       bg_color: 0x1B2535
                       border_width: 0
                       shadow_width: 0
                       widgets:
                         - label: { text: "Office 2", align: LEFT_MID, x: 16, text_color: 0xE8F2FA, text_font: montserrat_22 }
-                        - label: { id: ls_off2, text: "OFF", align: RIGHT_MID, x: -16, text_color: 0x5A6A7A, text_font: montserrat_22 }
+                        - obj:
+                            id: sw_off2
+                            x: -16
+                            align: RIGHT_MID
+                            width: 56
+                            height: 28
+                            radius: 14
+                            bg_color: 0x27313F
+                            bg_opa: COVER
+                            border_width: 0
+                            pad_all: 0
+                            widgets:
+                              - obj: { id: th_off2, x: 3, align: LEFT_MID, width: 22, height: 22, radius: 11, bg_color: 0x5A6A7A, bg_opa: COVER, border_width: 0 }
                       on_click:
                         - homeassistant.action:
                             action: light.toggle
                             data: { entity_id: light.office_office_light_2 }
-                  # office scenes
-                  - label: { text: "SCENES", x: 8, y: 116, text_color: 0xB58BF0, text_font: montserrat_14 }
-                  - button:
-                      x: 8
-                      y: 136
-                      width: 220
+                  - label: { text: "SCENES", text_color: 0xB58BF0, text_font: montserrat_14 }
+                  # scene buttons in a centered horizontal row
+                  - obj:
+                      width: 440
                       height: 48
-                      bg_color: 0x2A2140
+                      bg_opa: TRANSP
                       border_width: 0
-                      shadow_width: 0
+                      pad_all: 0
+                      layout:
+                        type: flex
+                        flex_flow: ROW
+                        flex_align_main: CENTER
+                        flex_align_cross: CENTER
+                        pad_column: 12
                       widgets:
-                        - label: { text: "Focus", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: scene.turn_on
-                            data: { entity_id: scene.jazziro_focus }
-                  - button:
-                      x: 236
-                      y: 136
-                      width: 220
-                      height: 48
-                      bg_color: 0x2A2140
-                      border_width: 0
-                      shadow_width: 0
-                      widgets:
-                        - label: { text: "Lerato Focus", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: scene.turn_on
-                            data: { entity_id: scene.lerato_study_focus }
+                        - button:
+                            width: 210
+                            height: 48
+                            bg_color: 0x2A2140
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Jazziro Focus", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: scene.turn_on
+                                  data: { entity_id: scene.jazziro_focus }
+                        - button:
+                            width: 210
+                            height: 48
+                            bg_color: 0x2A2140
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Lerato Focus", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: scene.turn_on
+                                  data: { entity_id: scene.lerato_study_focus }
               - name: "BEDROOM"
                 id: tab_bedroom
+                layout:
+                  type: flex
+                  flex_flow: COLUMN
+                  flex_align_main: START
+                  flex_align_cross: CENTER
+                  pad_row: 8
+                pad_all: 10
                 widgets:
-                  - button:
-                      id: lb_bed1
-                      x: 8
-                      y: 6
-                      width: 220
+                  # Bed 1 + Bed 2 in a centered row
+                  - obj:
+                      width: 440
                       height: 48
-                      bg_color: 0x1B2535
+                      bg_opa: TRANSP
                       border_width: 0
-                      shadow_width: 0
+                      pad_all: 0
+                      layout: { type: flex, flex_flow: ROW, flex_align_main: CENTER, flex_align_cross: CENTER, pad_column: 12 }
                       widgets:
-                        - label: { text: "Bed 1", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                        - label: { id: ls_bed1, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: light.toggle
-                            data: { entity_id: light.bedroom_light_1 }
-                  - button:
-                      id: lb_bed2
-                      x: 236
-                      y: 6
-                      width: 220
+                        - button:
+                            id: lb_bed1
+                            width: 214
+                            height: 48
+                            bg_color: 0x1B2535
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Bed 1", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                              - obj:
+                                  id: sw_bed1
+                                  x: -12
+                                  align: RIGHT_MID
+                                  width: 48
+                                  height: 24
+                                  radius: 12
+                                  bg_color: 0x27313F
+                                  bg_opa: COVER
+                                  border_width: 0
+                                  pad_all: 0
+                                  widgets:
+                                    - obj: { id: th_bed1, x: 3, align: LEFT_MID, width: 18, height: 18, radius: 9, bg_color: 0x5A6A7A, bg_opa: COVER, border_width: 0 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: light.toggle
+                                  data: { entity_id: light.bedroom_light_1 }
+                        - button:
+                            id: lb_bed2
+                            width: 214
+                            height: 48
+                            bg_color: 0x1B2535
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Bed 2", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                              - obj:
+                                  id: sw_bed2
+                                  x: -12
+                                  align: RIGHT_MID
+                                  width: 48
+                                  height: 24
+                                  radius: 12
+                                  bg_color: 0x27313F
+                                  bg_opa: COVER
+                                  border_width: 0
+                                  pad_all: 0
+                                  widgets:
+                                    - obj: { id: th_bed2, x: 3, align: LEFT_MID, width: 18, height: 18, radius: 9, bg_color: 0x5A6A7A, bg_opa: COVER, border_width: 0 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: light.toggle
+                                  data: { entity_id: light.bedroom_light_2 }
+                  # Bed 3 + Bed 4 in a centered row
+                  - obj:
+                      width: 440
                       height: 48
-                      bg_color: 0x1B2535
+                      bg_opa: TRANSP
                       border_width: 0
-                      shadow_width: 0
+                      pad_all: 0
+                      layout: { type: flex, flex_flow: ROW, flex_align_main: CENTER, flex_align_cross: CENTER, pad_column: 12 }
                       widgets:
-                        - label: { text: "Bed 2", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                        - label: { id: ls_bed2, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: light.toggle
-                            data: { entity_id: light.bedroom_light_2 }
-                  - button:
-                      id: lb_bed3
-                      x: 8
-                      y: 58
-                      width: 220
-                      height: 48
-                      bg_color: 0x1B2535
-                      border_width: 0
-                      shadow_width: 0
-                      widgets:
-                        - label: { text: "Bed 3", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                        - label: { id: ls_bed3, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: light.toggle
-                            data: { entity_id: light.bedroom_bedroom_light_3 }
-                  - button:
-                      id: lb_bed4
-                      x: 236
-                      y: 58
-                      width: 220
-                      height: 48
-                      bg_color: 0x1B2535
-                      border_width: 0
-                      shadow_width: 0
-                      widgets:
-                        - label: { text: "Bed 4", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                        - label: { id: ls_bed4, text: "OFF", align: RIGHT_MID, x: -12, text_color: 0x5A6A7A, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: light.toggle
-                            data: { entity_id: light.bedroom_bedroom_light_4 }
-                  # bedroom scenes
-                  - label: { text: "SCENES", x: 8, y: 112, text_color: 0xB58BF0, text_font: montserrat_14 }
-                  - button:
-                      x: 8
-                      y: 132
-                      width: 144
+                        - button:
+                            id: lb_bed3
+                            width: 214
+                            height: 48
+                            bg_color: 0x1B2535
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Bed 3", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                              - obj:
+                                  id: sw_bed3
+                                  x: -12
+                                  align: RIGHT_MID
+                                  width: 48
+                                  height: 24
+                                  radius: 12
+                                  bg_color: 0x27313F
+                                  bg_opa: COVER
+                                  border_width: 0
+                                  pad_all: 0
+                                  widgets:
+                                    - obj: { id: th_bed3, x: 3, align: LEFT_MID, width: 18, height: 18, radius: 9, bg_color: 0x5A6A7A, bg_opa: COVER, border_width: 0 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: light.toggle
+                                  data: { entity_id: light.bedroom_bedroom_light_3 }
+                        - button:
+                            id: lb_bed4
+                            width: 214
+                            height: 48
+                            bg_color: 0x1B2535
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Bed 4", align: LEFT_MID, x: 12, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                              - obj:
+                                  id: sw_bed4
+                                  x: -12
+                                  align: RIGHT_MID
+                                  width: 48
+                                  height: 24
+                                  radius: 12
+                                  bg_color: 0x27313F
+                                  bg_opa: COVER
+                                  border_width: 0
+                                  pad_all: 0
+                                  widgets:
+                                    - obj: { id: th_bed4, x: 3, align: LEFT_MID, width: 18, height: 18, radius: 9, bg_color: 0x5A6A7A, bg_opa: COVER, border_width: 0 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: light.toggle
+                                  data: { entity_id: light.bedroom_bedroom_light_4 }
+                  - label: { text: "SCENES", text_color: 0xB58BF0, text_font: montserrat_14 }
+                  # scenes in a centered row
+                  - obj:
+                      width: 440
                       height: 46
-                      bg_color: 0x2A2140
+                      bg_opa: TRANSP
                       border_width: 0
-                      shadow_width: 0
+                      pad_all: 0
+                      layout: { type: flex, flex_flow: ROW, flex_align_main: CENTER, flex_align_cross: CENTER, pad_column: 10 }
                       widgets:
-                        - label: { text: "Romance", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: scene.turn_on
-                            data: { entity_id: scene.romance }
-                  - button:
-                      x: 160
-                      y: 132
-                      width: 144
-                      height: 46
-                      bg_color: 0x2A2140
-                      border_width: 0
-                      shadow_width: 0
-                      widgets:
-                        - label: { text: "TLC", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: scene.turn_on
-                            data: { entity_id: scene.tlc }
-                  - button:
-                      x: 312
-                      y: 132
-                      width: 144
-                      height: 46
-                      bg_color: 0x2A2140
-                      border_width: 0
-                      shadow_width: 0
-                      widgets:
-                        - label: { text: "Default", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
-                      on_click:
-                        - homeassistant.action:
-                            action: scene.turn_on
-                            data: { entity_id: scene.default }
+                        - button:
+                            width: 140
+                            height: 46
+                            bg_color: 0x2A2140
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Romance", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: scene.turn_on
+                                  data: { entity_id: scene.romance }
+                        - button:
+                            width: 140
+                            height: 46
+                            bg_color: 0x2A2140
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "TLC", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: scene.turn_on
+                                  data: { entity_id: scene.tlc }
+                        - button:
+                            width: 140
+                            height: 46
+                            bg_color: 0x2A2140
+                            border_width: 0
+                            shadow_width: 0
+                            widgets:
+                              - label: { text: "Default", align: CENTER, text_color: 0xE8F2FA, text_font: montserrat_16 }
+                            on_click:
+                              - homeassistant.action:
+                                  action: scene.turn_on
+                                  data: { entity_id: scene.default }
